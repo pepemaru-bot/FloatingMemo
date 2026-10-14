@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "dictionary_name": "テスト用の架空辞書（実在しない学校名・用語）",
+  "description": "初期辞書と同じ形式の架空データ。E2E テスト専用。",
+  "scope": { "school_regions": ["東京都", "神奈川県"], "school_count": 2, "vocabulary_count": 2 },
+  "handling_rules": ["自動置換は禁止。", "全件を投入しない。"],
+  "entries": [
+    { "term": "架空学園中学校", "category": "school", "region": "東京都", "aliases": ["架空学園"], "source_id": "test", "policy": "hint_only" },
+    { "term": "未来ヶ丘中学校", "category": "school", "region": "神奈川県", "aliases": [], "source_id": "test", "policy": "hint_only" },
+    { "term": "解き直し", "category": "指導・学習管理", "aliases": [], "source_id": "test", "policy": "hint_only", "recognition_candidates": ["時直し"] },
+    { "term": "到達度テスト", "category": "塾・教材・試験", "aliases": ["到達度"], "source_id": "test", "policy": "hint_only" }
+  ]
+}

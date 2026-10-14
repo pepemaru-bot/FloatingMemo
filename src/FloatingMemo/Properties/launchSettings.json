@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "FloatingMemo (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "FloatingMemo (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

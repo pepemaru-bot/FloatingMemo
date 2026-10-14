@@ -1,0 +1,88 @@
+# ===== .NET / WinUI build output =====
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ARM64/
+artifacts/
+Generated\ Files/
+*_wpftmp.csproj
+
+# ===== IDE / editor =====
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+_ReSharper*/
+*.DotSettings.user
+
+# ===== NuGet =====
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+
+# ===== MSIX packaging / publish output =====
+AppPackages/
+BundleArtifacts/
+*.msix
+*.msixbundle
+*.msixupload
+*.appx
+*.appxbundle
+*.appxupload
+publish/
+PublishScripts/
+# Signing certificates / keys
+*.pfx
+*.p12
+*.cer
+*.snk
+
+# ===== Test / logs =====
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+[Ll]og/
+[Ll]ogs/
+*.log
+*.binlog
+
+# ===== Floating Memo: local / private data (must never be committed) =====
+# Memo data, settings and temp files used during local testing
+/notes/
+/data/
+/local/
+settings.local.json
+*.local.json
+# Whisper models (large, local only)
+/models/
+*.bin
+*.gguf
+*.ggml
+# Recorded audio
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+# Secrets
+.env
+.env.*
+
+# ===== Claude Code local settings =====
+.claude/settings.local.json
+
+# ===== OS =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ===== Portable distribution output (binaries + model; never committed) =====
+/dist/

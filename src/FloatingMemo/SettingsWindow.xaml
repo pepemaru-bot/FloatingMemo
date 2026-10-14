@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="FloatingMemo.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Floating Memo の設定">
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid Padding="20,12,20,16" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <SelectorBar x:Name="Sections" SelectionChanged="OnSectionChanged">
+            <SelectorBarItem x:Name="ModelSection" AutomationProperties.AutomationId="SettingsModels" IsSelected="True" Text="AIモデル" />
+            <SelectorBarItem x:Name="DictionarySection" AutomationProperties.AutomationId="SettingsDictionary" Text="専門用語辞書" />
+            <SelectorBarItem x:Name="CandidateSection" AutomationProperties.AutomationId="SettingsCandidates" Text="登録候補" />
+            <SelectorBarItem x:Name="AppearanceSection" AutomationProperties.AutomationId="SettingsAppearance" Text="見た目" />
+        </SelectorBar>
+
+        <!-- ===== AI models ===== -->
+        <ScrollViewer x:Name="ModelPanel" Grid.Row="1">
+            <StackPanel Spacing="12">
+                <TextBlock Style="{ThemeResource BodyStrongTextBlockStyle}" Text="AI議事録に使うモデル（すべてこのPC内で動作）" />
+                <RadioButtons x:Name="ModelList" AutomationProperties.AutomationId="ModelList" SelectionChanged="OnModelChanged" />
+                <TextBlock
+                    x:Name="NoModelText"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="モデルが見つかりません。Qwen3 の GGUF ファイル（Qwen3-1.7B-Q8_0.gguf または Qwen3-4B-Q4_K_M.gguf）を README の手順でダウンロードし、models\qwen フォルダに置いてください。"
+                    TextWrapping="Wrap"
+                    Visibility="Collapsed" />
+                <TextBlock
+                    x:Name="ModelFolders"
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    IsTextSelectionEnabled="True"
+                    TextWrapping="Wrap" />
+                <Button Click="OnOpenModelsFolder" Content="モデルのフォルダを開く" />
+                <ToggleSwitch
+                    x:Name="CorrectToggle"
+                    AutomationProperties.AutomationId="CorrectToggle"
+                    Header="議事録を作る前に、辞書と文脈で文字起こしを校正する"
+                    OffContent="校正しない（文字起こしをそのまま整理）"
+                    OnContent="校正する（推奨）"
+                    Toggled="OnCorrectToggled" />
+                <TextBlock
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="校正は AI が「聞き間違い」の候補を出し、辞書で裏付けられたものだけを直します。それ以外は〔要確認〕として原文のまま残し、議事録の末尾に記録します。元のノートは変更されません。"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ===== Appearance ===== -->
+        <StackPanel x:Name="AppearancePanel" Grid.Row="1" Spacing="14" Visibility="Collapsed">
+            <TextBlock Style="{ThemeResource BodyStrongTextBlockStyle}" Text="ガラスと本文の見え方（変更はすぐにメモへ反映されます）" />
+            <Slider
+                x:Name="ClaritySlider"
+                AutomationProperties.AutomationId="ClaritySlider"
+                Header="外周のガラスの透明感（左: 曇りガラス ／ 右: 透明）"
+                Maximum="100"
+                Minimum="0"
+                StepFrequency="5"
+                ValueChanged="OnAppearanceChanged" />
+            <Slider
+                x:Name="PaperSlider"
+                AutomationProperties.AutomationId="PaperSlider"
+                Header="本文の乳白感（左: 白 ／ 右: 青みのある乳白色）"
+                Maximum="100"
+                Minimum="0"
+                StepFrequency="5"
+                ValueChanged="OnAppearanceChanged" />
+            <TextBlock
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="本文は読みやすさを優先して不透明です（Markdown エディタの土台の WebView2 は背景を透過できないため、本文の下を透かすことはできません）。外周のガラスは、Windows の「透明効果」がオフのとき、省電力中、ハイコントラストでは透過しません。"
+                TextWrapping="Wrap" />
+            <Button Click="OnAppearanceReset" Content="既定に戻す（透明感 60・乳白感 60）" />
+        </StackPanel>
+
+        <!-- ===== Dictionary ===== -->
+        <Grid x:Name="DictionaryPanel" Grid.Row="1" RowSpacing="8" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <ToggleSwitch
+                x:Name="UseDictionaryToggle"
+                AutomationProperties.AutomationId="UseDictionaryToggle"
+                Header="辞書を AI 校正のヒントに使う（文字起こしに関係する語だけを AI に渡します。自動置換はしません）"
+                Toggled="OnUseDictionaryToggled" />
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="ImportDictionary" Click="OnImportClick" Content="JSON をインポート…" />
+                <TextBox
+                    x:Name="SearchBox"
+                    Width="220"
+                    AutomationProperties.AutomationId="DictionarySearch"
+                    PlaceholderText="用語を検索"
+                    TextChanged="OnSearchChanged" />
+                <TextBlock x:Name="EntryCount" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+            <!-- Categories (e.g. 学校名 per region): switch whole groups on/off. Scrolls when there are many. -->
+            <ScrollViewer
+                Grid.Row="2"
+                HorizontalScrollBarVisibility="Auto"
+                HorizontalScrollMode="Enabled"
+                VerticalScrollBarVisibility="Disabled"
+                VerticalScrollMode="Disabled">
+                <StackPanel x:Name="CategoryPanel" Padding="0,0,0,12" Orientation="Horizontal" Spacing="4" />
+            </ScrollViewer>
+            <ListView
+                x:Name="EntryList"
+                Grid.Row="3"
+                AutomationProperties.AutomationId="EntryList"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                SelectionChanged="OnEntrySelected"
+                SelectionMode="Single" />
+            <!-- Add / edit form -->
+            <Grid Grid.Row="4" ColumnSpacing="8" RowSpacing="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBox x:Name="TermBox" AutomationProperties.AutomationId="TermBox" Header="用語（正しい表記）" />
+                <TextBox x:Name="ReadingBox" Grid.Column="1" AutomationProperties.AutomationId="ReadingBox" Header="読み" />
+                <TextBox x:Name="CategoryBox" Grid.Column="2" AutomationProperties.AutomationId="CategoryBox" Header="分類" />
+                <TextBox x:Name="AliasBox" Grid.Row="1" Grid.ColumnSpan="1" AutomationProperties.AutomationId="AliasBox" Header="略称（、区切り）" />
+                <TextBox x:Name="MisBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" AutomationProperties.AutomationId="MisBox" Header="誤認識の例（、区切り）" />
+                <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="12">
+                    <CheckBox x:Name="EnabledBox" AutomationProperties.AutomationId="EnabledBox" Content="使う" IsChecked="True" />
+                    <CheckBox x:Name="HintBox" AutomationProperties.AutomationId="HintBox" Content="Whisper のヒントにも使う（よく使う語だけ）" />
+                    <Button AutomationProperties.AutomationId="SaveEntry" Click="OnSaveEntry" Content="保存" Style="{ThemeResource AccentButtonStyle}" />
+                    <Button AutomationProperties.AutomationId="NewEntry" Click="OnNewEntry" Content="新規" />
+                    <Button x:Name="DeleteButton" AutomationProperties.AutomationId="DeleteEntry" Click="OnDeleteEntry" Content="削除" IsEnabled="False" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <!-- ===== Candidates ===== -->
+        <Grid x:Name="CandidatePanel" Grid.Row="1" RowSpacing="8" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="議事録の「校正済み文字起こし」であなたが直した語句と、AI 校正が直した語句です。承認したものだけが辞書の「誤認識の例」に登録されます。"
+                TextWrapping="Wrap" />
+            <ListView
+                x:Name="CandidateList"
+                Grid.Row="1"
+                AutomationProperties.AutomationId="CandidateList"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                SelectionMode="Single" />
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="ApproveCandidate" Click="OnApprove" Content="承認して辞書に登録" Style="{ThemeResource AccentButtonStyle}" />
+                <Button AutomationProperties.AutomationId="RejectCandidate" Click="OnReject" Content="却下（今後も提案しない）" />
+                <Button AutomationProperties.AutomationId="HarvestCandidates" Click="OnHarvest" Content="議事録から修正を探す" />
+                <TextBlock x:Name="CandidateStatus" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,3 @@
+# Third-party code vendored by scripts/update-editor-vendor.ps1: keep it byte-for-byte as
+# published (no line-ending conversion, no whitespace checks).
+src/FloatingMemo/Editor/vendor/** -text -whitespace linguist-vendored

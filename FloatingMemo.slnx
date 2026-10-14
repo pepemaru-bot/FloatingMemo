@@ -1,0 +1,13 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="ARM64" />
+  </Configurations>
+  <Folder Name="/src/">
+    <Project Path="src/FloatingMemo.Core/FloatingMemo.Core.csproj" />
+    <Project Path="src/FloatingMemo/FloatingMemo.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FloatingMemo.Tests/FloatingMemo.Tests.csproj" />
+  </Folder>
+</Solution>

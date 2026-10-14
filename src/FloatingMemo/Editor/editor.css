@@ -1,0 +1,161 @@
+/* Floating Memo editor: text on the opaque "paper" card (the host normally asks for the light
+   theme because the paper is white; without a theme the page follows Windows). */
+:root {
+  color-scheme: light dark;
+  --text: rgba(255, 255, 255, 0.92);
+  --muted: rgba(255, 255, 255, 0.55);
+  --faint: rgba(255, 255, 255, 0.10);
+  --accent: #8ab4ff;
+  --code-bg: rgba(255, 255, 255, 0.07);
+  --selection: rgba(110, 160, 255, 0.35);
+  --done: rgba(255, 255, 255, 0.45);
+  --caret: #ffffff;            /* dark background -> white cursor */
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --text: rgba(0, 0, 0, 0.90);
+    --muted: rgba(0, 0, 0, 0.50);
+    --faint: rgba(0, 0, 0, 0.08);
+    --accent: #0a5fc8;
+    --code-bg: rgba(0, 0, 0, 0.05);
+    --selection: rgba(0, 95, 200, 0.22);
+    --done: rgba(0, 0, 0, 0.45);
+    --caret: #1b1b1b;
+  }
+}
+
+:root[data-theme="light"] {
+  --text: rgba(0, 0, 0, 0.90);
+  --muted: rgba(0, 0, 0, 0.50);
+  --faint: rgba(0, 0, 0, 0.08);
+  --accent: #0a5fc8;
+  --code-bg: rgba(0, 0, 0, 0.05);
+  --selection: rgba(0, 95, 200, 0.22);
+  --done: rgba(0, 0, 0, 0.45);
+  --caret: #1b1b1b;            /* white paper -> near-black cursor, also in Windows dark mode */
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  /* The paper colour comes from the host (white, or a softer white in Windows dark mode).
+     WebView2 does not reliably show the XAML card through a transparent page. */
+  background: var(--paper, transparent);
+  overflow: hidden;
+}
+
+#editor, .cm-editor {
+  height: 100%;
+}
+
+.cm-editor {
+  background: transparent;
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Yu Gothic UI", "Meiryo UI", sans-serif;
+  font-size: 15px;
+}
+
+.cm-editor.cm-focused { outline: none; }
+
+.cm-scroller {
+  font-family: inherit;
+  line-height: 1.6;
+}
+
+.cm-content {
+  padding: 4px 10px 24px 10px;
+  caret-color: var(--caret);
+  tab-size: 4;
+}
+
+.cm-line { padding: 0; }
+
+/* The cursor: 2px wide in a colour chosen for the paper, not for the Windows theme.
+   !important beats CodeMirror's built-in theme (1.2px, colour by its own dark/light guess). */
+.cm-editor .cm-cursor,
+.cm-editor .cm-dropCursor {
+  border-left: 2px solid var(--caret) !important;
+  margin-left: -1px;
+}
+
+/* High contrast (Windows contrast themes): use the system text colour. */
+@media (forced-colors: active) {
+  :root { --caret: CanvasText; --paper: Canvas; }
+  .cm-editor .cm-cursor, .cm-editor .cm-dropCursor { border-left-color: CanvasText !important; }
+}
+
+.cm-selectionBackground,
+.cm-focused .cm-selectionBackground,
+.cm-content ::selection { background: var(--selection) !important; }
+
+.cm-placeholder { color: var(--muted); }
+
+/* --- Live preview ------------------------------------------------------------------ */
+.cm-h1 { font-size: 1.55em; font-weight: 600; }
+.cm-h2 { font-size: 1.32em; font-weight: 600; }
+.cm-h3 { font-size: 1.15em; font-weight: 600; }
+.cm-h4, .cm-h5, .cm-h6 { font-weight: 600; }
+
+.cm-strong { font-weight: 700; }
+.cm-em { font-style: italic; }
+.cm-strike { text-decoration: line-through; color: var(--muted); }
+.cm-md-mark { color: var(--muted); }
+
+.cm-inline-code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.cm-codeblock {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+  background: var(--code-bg);
+}
+.cm-code-fence { color: var(--muted); }
+
+.cm-quote {
+  border-left: 3px solid var(--faint);
+  padding-left: 10px !important;
+  color: var(--muted);
+}
+
+.cm-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.cm-url { color: var(--muted); }
+
+.cm-bullet {
+  display: inline-block;
+  width: 1em;
+  color: var(--muted);
+  text-align: center;
+}
+
+.cm-list-number { color: var(--muted); }
+
+.cm-task-checkbox {
+  width: 1em;
+  height: 1em;
+  margin: 0 0.35em 0 0;
+  vertical-align: -0.12em;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.cm-task-done { color: var(--done); text-decoration: line-through; }
+
+.cm-hr {
+  display: inline-block;
+  width: 100%;
+  vertical-align: middle;
+  border-top: 1px solid var(--faint);
+  margin: 0;
+}
+
+/* Thin, quiet scrollbar (the default one is heavy for a small floating window). */
+.cm-scroller::-webkit-scrollbar { width: 8px; height: 8px; }
+.cm-scroller::-webkit-scrollbar-track { background: transparent; }
+.cm-scroller::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 4px; }
+.cm-scroller::-webkit-scrollbar-thumb:hover { background: var(--muted); }

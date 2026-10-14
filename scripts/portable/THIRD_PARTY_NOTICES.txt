@@ -1,0 +1,137 @@
+﻿Floating Memo - Third-party notices
+===================================
+
+This distribution includes the following third-party components.
+Floating Memo itself is not licensed under any of these licenses (its license is
+not decided yet; all rights reserved).
+
+NO AI MODELS ARE INCLUDED. The Whisper speech recognition model and the Qwen3
+language models are downloaded separately by the user from their official
+sources and are governed by their own licenses:
+  Whisper GGML models: https://huggingface.co/ggerganov/whisper.cpp
+                       (MIT License, Copyright (c) 2022 OpenAI)
+  Qwen3 GGUF models  : https://huggingface.co/Qwen
+                       (Apache License 2.0, Copyright (c) Alibaba Cloud)
+
+-------------------------------------------------------------------------------
+whisper.cpp (native libraries in runtimes/, via Whisper.net.Runtime 1.9.1)
+  https://github.com/ggml-org/whisper.cpp
+  License: MIT License, Copyright (c) 2023-2024 The ggml authors
+
+Whisper.net 1.9.1
+  https://github.com/sandrohanea/whisper.net
+  License: MIT License, Copyright (c) 2024 sandrohanea
+
+NAudio 3.1.0 (NAudio.Core, NAudio.Wasapi)
+  https://github.com/naudio/NAudio
+  License: MIT License, Copyright (c) Mark Heath
+
+CodeMirror 6 and Lezer (Markdown editor, Editor\vendor\; versions in Editor\vendor\versions.json)
+  https://codemirror.net/ , https://lezer.codemirror.net/
+  License: MIT License, Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+  (each package's LICENSE file is included next to it)
+
+style-mod, w3c-keyname, crelt, @marijn/find-cluster-break (CodeMirror dependencies)
+  License: MIT License, Copyright (C) Marijn Haverbeke and others
+
+Markdig 1.4.0 (Markdown parsing for PDF / Word export)
+  https://github.com/xoofx/markdig
+  License: BSD 2-Clause License (full text at the end of this file)
+
+DocumentFormat.OpenXml 3.5.1 (Open XML SDK, Word export)
+  https://github.com/dotnet/Open-XML-SDK
+  License: MIT License, Copyright (c) .NET Foundation and Contributors
+
+LLamaSharp 0.27.0 (local AI minutes)
+  https://github.com/SciSharp/LLamaSharp
+  License: MIT License, Copyright (c) 2023 Rinne, Martin Evans, Haiping Chen and other contributors
+
+llama.cpp / ggml (native libraries in runtimes/win-x64/native/, via LLamaSharp.Backend.Cpu 0.27.0)
+  https://github.com/ggml-org/llama.cpp
+  License: MIT License, Copyright (c) 2023-2024 The ggml authors
+
+CommunityToolkit.HighPerformance 8.4.2
+  https://github.com/CommunityToolkit/dotnet
+  License: MIT License, Copyright (c) .NET Foundation and Contributors
+  (licenses\CommunityToolkit-License.txt, licenses\CommunityToolkit-ThirdPartyNotices.txt)
+
+Microsoft.Bcl.*, Microsoft.Extensions.*, System.* support libraries (dependencies of the above)
+  https://github.com/dotnet , https://github.com/dotnet/reactive
+  License: MIT License, Copyright (c) .NET Foundation and Contributors
+
+.NET runtime 10
+  https://github.com/dotnet/runtime
+  License: MIT License, Copyright (c) .NET Foundation and Contributors
+
+MIT License text (applies to all MIT components above, with their respective
+copyright notices):
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+-------------------------------------------------------------------------------
+Microsoft Edge WebView2 SDK 1.0.3719.77 (Microsoft.Web.WebView2.Core.dll and related files)
+  https://www.nuget.org/packages/Microsoft.Web.WebView2
+  License: BSD-style license, Copyright (C) Microsoft Corporation
+  (licenses\WebView2-LICENSE.txt, licenses\WebView2-NOTICE.txt)
+  The WebView2 Runtime itself is part of Windows 11 and is not included.
+
+-------------------------------------------------------------------------------
+Windows App SDK 2.5.1 (self-contained runtime files)
+  https://github.com/microsoft/WindowsAppSDK
+  Microsoft Software License Terms. Files placed with the application by the
+  Windows App SDK NuGet package are redistributable ("Distributable Code").
+  (licenses\WindowsAppSDK-license.txt, licenses\WindowsAppSDK-NOTICE.txt)
+
+Microsoft Windows ML Runtime 2.1.74 (pulled in by the Windows App SDK; includes
+ONNX Runtime and DirectML: onnxruntime.dll, DirectML.dll, Microsoft.ML.OnnxRuntime.dll)
+  Microsoft Software License Terms (licenses\WindowsML-license.txt) and
+  third-party notices (licenses\WindowsML-ThirdPartyNotices.txt).
+  Floating Memo does not use these components directly.
+
+By using this distribution you agree to the Microsoft license terms above for
+those components. "Microsoft", "Windows" and "Edge" are trademarks of the
+Microsoft group of companies; Floating Memo is not affiliated with or endorsed
+by Microsoft.
+
+-------------------------------------------------------------------------------
+Markdig - BSD 2-Clause License
+
+  Copyright (c) 2018-2019, Alexandre Mutel
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without modification
+  , are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
