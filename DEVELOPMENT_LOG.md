@@ -1576,6 +1576,54 @@ Markdown 編集（markdown 17 項目）、ウィンドウ操作（chrome 16 項�
 - ポータブル版: `dist\FloatingMemo-Portable-20261013-0210.zip`（248MB、モデルなし）、`-Lite-20261013-0210.zip`（1.9GB、Qwen3 1.7B）、
   `-Standard-20261013-0210.zip`（2.5GB、Qwen3 4B）。既存の ZIP は上書きしていない。モデルは既存のものを再利用（ダウンロードなし）
 
+## GitHub 初回公開（v0.1.0、2026-10-15）
+
+公開先: https://github.com/pepemaru-bot/FloatingMemo （Public）／
+Release: https://github.com/pepemaru-bot/FloatingMemo/releases/tag/v0.1.0 （プレリリース、`FloatingMemo-Portable-v0.1.0-x64.zip`）
+
+### Phase 1: 公開前監査
+
+- **公開用の履歴は新規に作成**: 開発リポジトリの履歴（41 コミット）はそのまま残し、監査済みのファイルだけで
+  1 コミットの公開専用リポジトリを別フォルダに作った（`.gitignore` では過去の履歴は守れないため）。
+  除外・修正したもの: 作業画面の文字が端に写っていたスクリーンショット 1 枚を除外、開発ログの PC 固有の
+  音声デバイス名と、ユーザーの辞書ファイルの内訳を伏せた。辞書ファイル（`handoff/`、未追跡）・モデル・`dist/` は対象外
+- **秘密情報**: 全履歴・全ファイルで API キー・トークン・パスワード・メールアドレス（GitHub の noreply を除く）・
+  個人名・実際の会議データがないことを確認。評価・テストの会議データはすべて架空
+- **ライセンス**: NuGet 依存はすべて MIT / BSD-2（Markdig）/ BSD 形式（WebView2 SDK）。Windows App SDK と
+  Windows ML ランタイム（ONNX Runtime・DirectML を含む）は Microsoft のライセンス条項で、同梱ファイルは再配布可能。
+  条件（エンドユーザーへの条項の提示など）に合わせて全文を `licenses\` に入れ、README と README_PORTABLE に記載。
+  CodeMirror 6 / Lezer ほか JS 部品は MIT（各 LICENSE を同梱）。アプリのアイコン類は WinUI テンプレート（MIT）のまま。
+  フォントは配布せず、PDF には Windows 標準フォント（埋め込み許可あり）を使用
+- **本体のライセンスは未定**: MIT 等は付けず、README に「未定（All rights reserved）」と明記
+
+### Phase 2: AI モデル非同梱での配布
+
+- モデルの探索場所を `ModelLocations` にまとめた: アプリの `models\whisper` / `models\qwen` → アプリの `models`（旧配置）
+  → `%USERPROFILE%\FloatingMemo\models\whisper` / `qwen` → 同 `models`（旧配置）。`FLOATINGMEMO_MODELS_DIR` で
+  ユーザー側のフォルダを差し替え可能（別ドライブに置く場合と、テストで個人のモデルを見ないようにするため）
+- Whisper は `ggml-base.bin`、なければ `ggml-small.bin`。モデルがないときの案内は README の手順と置き場所を示す
+- `build-portable.ps1` はモデルを一切入れない（空の `models\whisper` / `models\qwen` と説明書のみ）。モデル形式のファイル・
+  100MB 超のファイル・ビルド PC のユーザー名を含むファイルがあれば失敗する。
+  **PDB にビルド PC のユーザー名（NuGet のパス）が入っていたため、PDB は配布しない**ようにした。
+  また、Windows PowerShell 5.1 の ZIP 作成はパス区切りが `\` になり他の解凍ツールで壊れるため、`/` で書くようにした
+- README に、公式配布元・ファイル名・量子化・サイズ・ハッシュ・必要メモリ・置き場所・確認方法・トラブル対処を記載。
+  サイズと SHA-256 は Hugging Face の配布ファイルと一致することを確認した
+
+### Phase 3: テストと公開
+
+| テスト | 結果 |
+|---|---|
+| Release ビルド | 警告 0・エラー 0 |
+| 単体テスト | 191 合格・7 スキップ。公開用フォルダでの初回実行で 1 件だけ失敗し、その後 4 回連続で全件合格（どのテストかは特定できず。タイミング依存の可能性） |
+| E2E（18 スイート） | 326 項目合格。autosave は初回起動時の UI オートメーションの一時エラー、recording は案内文の変更に合わせた判定の修正で、いずれも再実行して合格 |
+| ZIP の監査 | 618 項目。モデル・PDB・個人データ・`\` 区切りなし。ビルド PC のユーザー名なし |
+| ポータブル版（新しいフォルダに展開、モデルなし） | 11 項目合格（モデルがないときの案内を含む） |
+| ポータブル版（`models\qwen` に 1.7B、`models\whisper` に base をコピーして配置） | 10 項目合格（AI議事録の作成まで約 60 秒） |
+| 公開後 | Release からダウンロードした ZIP の SHA-256 が一致。README のページ内リンク 17 個と外部リンクがすべて有効 |
+
+未確認: ポータブル版での実際の録音→文字起こし（実マイクを使うため。探索処理は単体テスト、文字起こしは E2E で確認）、
+Windows 11 以外・ARM・ノート PC での動作。WebView2 の通信は未解決のまま（README に明記し、「完全オフライン」とは書かない）。
+
 ## 設計メモ: 複数ノート・タブ管理（当初の設計）
 
 ポータブル版を優先したため実装は見送り、設計のみ残す。既存 `draft.md` を失わないことを最優先にする。
