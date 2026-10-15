@@ -222,7 +222,7 @@ Get-FileHash .\models\qwen\Qwen3-4B-Q4_K_M.gguf -Algorithm SHA256
 
 ## 専門用語辞書
 
-固有名詞や専門用語の聞き間違い（例: 「加工学園」→「架空学園」）を、AI議事録の前の校正で直すための辞書です。
+固有名詞や専門用語の聞き間違い（例: 「クロード」→「Claude」）を、AI議事録の前の校正で直すための辞書です。
 
 - 議事録ボタン →「AIモデル・専門用語辞書の設定…」で、追加・編集・削除・JSON のインポート / エクスポートができます
 - 1 語ごとに「正しい表記・別名・よくある誤認識・分類」を持てます（形式の例: [tests/e2e/fixtures/sample-lexicon.json](tests/e2e/fixtures/sample-lexicon.json)、架空のデータ）
