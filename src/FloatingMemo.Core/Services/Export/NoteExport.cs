@@ -36,7 +36,7 @@ public static class ExportContent
             return text;
         }
 
-        int appendix = text.IndexOf("\n---\n\n## 校正の記録", StringComparison.Ordinal);
+        int appendix = FloatingMemo.Services.Minutes.MinutesValidator.AppendixStart(text);
         return (appendix >= 0 ? text[..appendix] : text).TrimEnd() + "\n";
     }
 

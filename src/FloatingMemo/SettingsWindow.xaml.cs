@@ -1,4 +1,5 @@
 using FloatingMemo.Services;
+using FloatingMemo.Services.Acceleration;
 using FloatingMemo.Services.Dictionary;
 using FloatingMemo.Services.Minutes;
 using FloatingMemo.Services.Notes;
@@ -42,18 +43,32 @@ public sealed partial class SettingsWindow : Window
         _loading = true;
         LoadModels();
         CorrectToggle.IsOn = services.Preferences.CorrectTranscriptBeforeMinutes;
+        AccelerationBox.SelectedIndex = (int)services.Preferences.Acceleration;
+        ShowAccelerationReport();
         ClaritySlider.Value = Math.Round(services.Preferences.GlassClarity * 100);
         PaperSlider.Value = Math.Round(services.Preferences.PaperMilkiness * 100);
         UseDictionaryToggle.IsOn = _dictionary.Data.UseForCorrection;
         _loading = false;
         RenderCategories();
         RenderEntries();
+        RenderTemplates();
         Harvest(silent: true);
         RenderCandidates();
 #if TEST_HOOKS
         // Test builds only: "--import-dictionary <file>" runs the import button's code with that
         // file once the window is shown (the system file dialog itself cannot be automated reliably).
         string[] args = Environment.GetCommandLineArgs();
+        int tpl = Array.IndexOf(args, "--import-template");
+        if (tpl >= 0 && tpl + 1 < args.Length)
+        {
+            string templatePath = args[tpl + 1];
+            ((FrameworkElement)Content).Loaded += async (_, _) =>
+            {
+                ShowSection("templates");
+                await ImportTemplateAsync(templatePath);
+            };
+        }
+
         int at = Array.IndexOf(args, "--import-dictionary");
         if (at >= 0 && at + 1 < args.Length)
         {
@@ -75,6 +90,7 @@ public sealed partial class SettingsWindow : Window
             "dictionary" => DictionarySection,
             "candidates" => CandidateSection,
             "appearance" => AppearanceSection,
+            "templates" => TemplateSection,
             _ => ModelSection,
         };
     }
@@ -87,6 +103,138 @@ public sealed partial class SettingsWindow : Window
         AppearancePanel.Visibility = sender.SelectedItem == AppearanceSection ? Visibility.Visible : Visibility.Collapsed;
         DictionaryPanel.Visibility = sender.SelectedItem == DictionarySection ? Visibility.Visible : Visibility.Collapsed;
         CandidatePanel.Visibility = sender.SelectedItem == CandidateSection ? Visibility.Visible : Visibility.Collapsed;
+        TemplatePanel.Visibility = sender.SelectedItem == TemplateSection ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ----- Minutes templates (the user's own; data only, never executed) --------------------
+
+    private IReadOnlyList<MinutesTemplate> _templates = [];
+
+    private void RenderTemplates(string? select = null)
+    {
+        _loading = true;
+        _templates = _services.Templates.All();
+        TemplateList.Items.Clear();
+        foreach (var t in _templates)
+        {
+            TemplateList.Items.Add($"{t.Name}（{t.Sections.Count} 見出し）");
+        }
+
+        int at = _templates.ToList().FindIndex(t => t.Id == select);
+        TemplateList.SelectedIndex = at >= 0 ? at : (_templates.Count > 0 ? 0 : -1);
+        TemplateJson.Text = SelectedTemplate is { } current ? TemplateLibrary.ToJson(current) : string.Empty;
+        _loading = false;
+    }
+
+    private MinutesTemplate? SelectedTemplate =>
+        TemplateList.SelectedIndex >= 0 && TemplateList.SelectedIndex < _templates.Count ? _templates[TemplateList.SelectedIndex] : null;
+
+    private void OnTemplateSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_loading)
+        {
+            TemplateJson.Text = SelectedTemplate is { } t ? TemplateLibrary.ToJson(t) : string.Empty;
+        }
+    }
+
+    private async void OnImportTemplate(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".md");
+        picker.FileTypeFilter.Add(".json");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        if (await picker.PickSingleFileAsync() is { } file)
+        {
+            await ImportTemplateAsync(file.Path);
+        }
+    }
+
+    private async Task ImportTemplateAsync(string path)
+    {
+        try
+        {
+            var t = _services.Templates.Import(path);
+            RenderTemplates(t.Id);
+            await Message("テンプレートを読み込みました", $"「{t.Name}」（{t.Sections.Count} 見出し）。議事録ボタン →「議事録の形式」で選ぶと使われます。");
+        }
+        catch (Exception ex) when (ex is TemplateFormatException or IOException or UnauthorizedAccessException)
+        {
+            await Message("読み込めませんでした", ex.Message);
+        }
+    }
+
+    private async void OnSaveTemplate(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTemplate is not { } current)
+        {
+            return;
+        }
+
+        try
+        {
+            var edited = TemplateLibrary.ParseJson(TemplateJson.Text);
+            edited.Id = current.Id; // the same template, edited
+            RenderTemplates(_services.Templates.Save(edited).Id);
+        }
+        catch (TemplateFormatException ex)
+        {
+            await Message("保存できませんでした", ex.Message);
+        }
+    }
+
+    private void OnDuplicateTemplate(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTemplate is { } current)
+        {
+            RenderTemplates(_services.Templates.Duplicate(current).Id);
+        }
+    }
+
+    private async void OnExportTemplate(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTemplate is not { } current)
+        {
+            return;
+        }
+
+        var picker = new FileSavePicker { SuggestedFileName = current.Name };
+        picker.FileTypeChoices.Add("JSON", [".json"]);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        if (await picker.PickSaveFileAsync() is { } file)
+        {
+            await Windows.Storage.FileIO.WriteTextAsync(file, TemplateLibrary.ToJson(current));
+        }
+    }
+
+    private async void OnDeleteTemplate(object sender, RoutedEventArgs e)
+    {
+        if (SelectedTemplate is not { } current)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = $"テンプレート「{current.Name}」を削除しますか？",
+            Content = "作成済みの議事録は変わりません。",
+            PrimaryButtonText = "削除",
+            CloseButtonText = "キャンセル",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        _services.Templates.Delete(current.Id);
+        if (_services.Preferences.MinutesTemplateId == current.Id)
+        {
+            _services.Preferences.MinutesTemplateId = null; // back to おまかせ
+            _services.Settings.TrySave(_services.Preferences);
+        }
+
+        RenderTemplates();
     }
 
     // ----- Appearance ------------------------------------------------------------------------
@@ -147,6 +295,28 @@ public sealed partial class SettingsWindow : Window
     {
         Directory.CreateDirectory(LlamaTextGenerator.ModelsDirectory);
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{LlamaTextGenerator.ModelsDirectory}\"") { UseShellExecute = true });
+    }
+
+    private void OnAccelerationChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || AccelerationBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _services.Preferences.Acceleration = (AccelerationMode)AccelerationBox.SelectedIndex;
+        _services.Settings.TrySave(_services.Preferences);
+        ShowAccelerationReport();
+    }
+
+    /// <summary>GPUs found, what each engine uses and why (shown on this PC only; not logged).</summary>
+    private void ShowAccelerationReport()
+    {
+        string pending = _services.Preferences.Acceleration != AccelerationState.Mode
+            ? $"\n変更はアプリを再起動すると反映されます（現在: {AccelerationPolicy.Label(AccelerationState.Mode)}）。"
+            : string.Empty;
+        AccelerationReport.Text = AccelerationState.Report() + pending
+            + "\nGPU は Vulkan で使います（NVIDIA・AMD・Intel）。使えないときは自動で CPU になります。";
     }
 
     private void OnCorrectToggled(object sender, RoutedEventArgs e)

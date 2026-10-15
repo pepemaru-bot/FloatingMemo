@@ -35,8 +35,11 @@ dotnet publish (Join-Path $root 'src\FloatingMemo\FloatingMemo.csproj') -c Relea
     -p:Platform=x64 -p:Portable=true -p:PublishProfile= -o $app
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
-# LLamaSharp copies native libraries for every OS; only Windows x64 is needed here.
+# LLamaSharp / Whisper.net copy native libraries for every OS; only Windows x64 is needed here.
+# runtimes\vulkan\win-x64 is the GPU (Vulkan) build of whisper.cpp: keep it.
 Get-ChildItem (Join-Path $app 'runtimes') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notin 'win-x64', 'vulkan' } | Remove-Item -Recurse -Force
+Get-ChildItem (Join-Path $app 'runtimes\vulkan') -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne 'win-x64' } | Remove-Item -Recurse -Force
 
 # Debug symbols embed build-machine paths (including the Windows user name); not shipped.

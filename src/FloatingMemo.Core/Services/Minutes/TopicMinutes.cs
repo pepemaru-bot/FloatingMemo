@@ -15,17 +15,27 @@ public enum MinutesStyle
     /// separate sections. The person's own notes are passed apart from the transcript.
     /// </summary>
     Topics,
+
+    /// <summary>
+    /// Facts first: the source is numbered (notes A…, transcript sentences B…), the model lists
+    /// facts with the numbers that back them, the checks verify them, and the minutes are
+    /// written from the checked facts only (see <see cref="FactMinutes"/>).
+    /// </summary>
+    Facts,
 }
 
 /// <summary>Which layout each model gets (from the same-conditions comparison, docs/evaluation).</summary>
 public static class MinutesStyles
 {
     /// <summary>
-    /// Topics, except for Qwen3 1.7B: with the topic layout it dropped topics of a long meeting
-    /// (8/10), while the fixed headings kept all of them. 4B was as good or better on every check.
+    /// Facts first, except for Qwen3 1.7B. Same made-up meetings, same settings: with 4B the
+    /// fact-first layout was as good or better than the topic layout on every check (10/10 topics,
+    /// tasks 2/2, no duplicates or unsupported items) and about 20 % faster; 1.7B found only 3 of
+    /// 10 topics of a long meeting that way (8 with topics, 10 with the fixed headings), so it
+    /// keeps the fixed headings.
     /// </summary>
     public static MinutesStyle For(string modelName) =>
-        modelName.Contains("1.7B", StringComparison.OrdinalIgnoreCase) ? MinutesStyle.FixedSections : MinutesStyle.Topics;
+        modelName.Contains("1.7B", StringComparison.OrdinalIgnoreCase) ? MinutesStyle.FixedSections : MinutesStyle.Facts;
 }
 
 /// <summary>Instructions for the topic style (Japanese, because the meetings are Japanese).</summary>

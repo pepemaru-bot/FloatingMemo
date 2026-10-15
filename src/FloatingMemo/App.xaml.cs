@@ -83,6 +83,10 @@ public partial class App : Application
         var settings = new SettingsService(GetArgument("--settings-file") ?? SettingsService.DefaultFilePath);
         var preferences = settings.Load();
 
+        // GPU or CPU for Whisper and Qwen: decided once, before either loads a native library.
+        FloatingMemo.Services.Acceleration.AccelerationState.Initialize(
+            GetArgument("--acceleration") is { } forced && Enum.TryParse<FloatingMemo.Services.Acceleration.AccelerationMode>(forced, true, out var m) ? m : preferences.Acceleration);
+
         // Nothing is recorded until the user presses the record button. Listing devices and
         // watching for changes does not open any device.
         var (devices, captureFactory) = CreateAudioDevices(() => preferences.Microphone);

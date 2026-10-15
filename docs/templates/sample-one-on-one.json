@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "name": "1on1 ミーティング（サンプル）",
+  "description": "架空の 1on1 用サンプル。JSON では見出しごとに書き方と、話されなかったときの扱いを決められます。",
+  "sections": [
+    { "title": "話したこと", "instruction": "話題ごとに 1〜3 行。", "whenMissing": "記載なし", "kind": "facts" },
+    { "title": "うまくいっていること", "instruction": "本人が挙げた良かった点。", "whenMissing": "省略", "kind": "facts" },
+    { "title": "困っていること", "instruction": "本人が挙げた困りごと。推測で補わない。", "whenMissing": "未確認", "kind": "facts" },
+    { "title": "次までにやること", "instruction": "担当と期限が明言された作業。", "whenMissing": "記載なし", "kind": "facts" },
+    { "title": "振り返りメモ（下書き）", "instruction": "本人に送る 3 行程度のまとめ。会議で話されたことだけ。", "whenMissing": "省略", "kind": "draft" }
+  ]
+}

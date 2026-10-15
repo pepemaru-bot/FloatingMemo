@@ -42,6 +42,15 @@ DocumentFormat.OpenXml 3.5.1 (Open XML SDK, Word export)
   https://github.com/dotnet/Open-XML-SDK
   License: MIT License, Copyright (c) .NET Foundation and Contributors
 
+Whisper.net.Runtime.Vulkan 1.9.1 (GPU build of whisper.cpp, runtimes/vulkan/win-x64/)
+  https://github.com/sandrohanea/whisper.net
+  License: MIT License, Copyright (c) 2024 sandrohanea; whisper.cpp / ggml: MIT, The ggml authors
+  Uses the Vulkan loader (vulkan-1.dll) installed with the graphics driver; it is not included.
+
+LLamaSharp.Backend.Vulkan.Windows 0.27.0 (GPU build of llama.cpp, runtimes/win-x64/native/vulkan/)
+  https://github.com/SciSharp/LLamaSharp
+  License: MIT License; llama.cpp / ggml: MIT, The ggml authors
+
 LLamaSharp 0.27.0 (local AI minutes)
   https://github.com/SciSharp/LLamaSharp
   License: MIT License, Copyright (c) 2023 Rinne, Martin Evans, Haiping Chen and other contributors

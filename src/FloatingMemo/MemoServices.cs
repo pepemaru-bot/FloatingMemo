@@ -17,4 +17,8 @@ public sealed record MemoServices(
     IAudioDeviceCatalog Devices,
     IAudioCaptureFactory CaptureFactory,
     Func<ILocalTextGenerator?> CreateMinutesModel,
-    TermDictionary Dictionary);
+    TermDictionary Dictionary)
+{
+    /// <summary>The user's minutes templates (stored next to the notes, never in the app folder).</summary>
+    public TemplateLibrary Templates { get; } = new(TemplateLibrary.PathFor(Workspace.Library.MetaDirectory));
+}

@@ -78,6 +78,10 @@ try {
   TypeText "架空の定例会議です。リリース日は十一月一日に決まりました。資料の準備は田中さんが金曜日までに行います。"
   Start-Sleep -Milliseconds 1500
   Check "minutes menu opens" (MinutesMenu 'MinutesCreate')
+  # The typed note has no transcript block: the app asks first; confirm "メモだけで作成".
+  for ($i = 0; $i -lt 20 -and -not ($anyway = Find 'MinutesWithoutTranscript'); $i++) { Start-Sleep -Milliseconds 150 }
+  Check "no transcript -> asked before making minutes" ($anyway -ne $null)
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
   if ($WithModels) {
     $done = $false
     for ($i = 0; $i -lt 600 -and -not $done; $i++) { Start-Sleep 1; $done = (MinutesFiles).Count -gt 0 }

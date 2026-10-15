@@ -2,6 +2,7 @@ using System.Text;
 using LLama;
 using LLama.Common;
 using LLama.Sampling;
+using FloatingMemo.Services.Acceleration;
 
 namespace FloatingMemo.Services.Minutes;
 
@@ -23,7 +24,7 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
         _parameters = new ModelParams(modelPath)
         {
             ContextSize = contextSize,
-            GpuLayerCount = 0, // CPU only: works the same on any laptop
+            GpuLayerCount = 0, // decided when the model is loaded (see LoadAsync)
             Threads = threads ?? Math.Max(1, Environment.ProcessorCount / 2),
         };
     }
@@ -101,6 +102,30 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
         return null;
     }
 
+    /// <summary>
+    /// All layers on the GPU when the policy says the model fits, otherwise none. If loading on
+    /// the GPU fails (driver, memory), the model is loaded again for the CPU.
+    /// </summary>
+    private async Task<LLamaWeights> LoadAsync(CancellationToken cancellationToken)
+    {
+        long bytes = File.Exists(_modelPath) ? new FileInfo(_modelPath).Length : 0;
+        var choice = AccelerationPolicy.ForLlm(AccelerationState.Mode, AccelerationState.Adapters, bytes);
+        _parameters.GpuLayerCount = choice.UseGpu ? 999 : 0;
+        try
+        {
+            var weights = await Task.Run(() => LLamaWeights.LoadFromFile(_parameters), cancellationToken).ConfigureAwait(false);
+            AccelerationState.Record(choice with { Backend = choice.UseGpu ? "GPU / Vulkan（全層）" : "CPU" });
+            return weights;
+        }
+        catch (Exception ex) when (choice.UseGpu && ex is not OperationCanceledException)
+        {
+            _parameters.GpuLayerCount = 0;
+            var weights = await Task.Run(() => LLamaWeights.LoadFromFile(_parameters), cancellationToken).ConfigureAwait(false);
+            AccelerationState.Record(choice with { UseGpu = false, Backend = "CPU", Reason = "GPU で読み込めず CPU に切り替え" });
+            return weights;
+        }
+    }
+
     public async Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -109,7 +134,7 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
             if (_weights is null)
             {
                 progress?.Report(-1); // loading the model file (a few seconds)
-                _weights = await Task.Run(() => LLamaWeights.LoadFromFile(_parameters), cancellationToken).ConfigureAwait(false);
+                _weights = await LoadAsync(cancellationToken).ConfigureAwait(false);
             }
 
             progress?.Report(0);

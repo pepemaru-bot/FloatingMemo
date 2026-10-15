@@ -111,6 +111,7 @@ public static partial class MinutesQuality
     public static QualityReport Analyze(string minutesMarkdown, string transcript, IReadOnlyList<TermEntry>? dictionary = null)
     {
         var sections = Sections(ExportBody(minutesMarkdown));
+        var numbered = NumberedSource(minutesMarkdown);
         string source = MinutesValidator.Normalize(transcript);
         var issues = new List<QualityIssue>();
         var seen = new List<(string Section, string Item, string Key)>();
@@ -132,6 +133,13 @@ public static partial class MinutesQuality
 
                 // Placeholders and empty items.
                 var quotes = Quote().Matches(content).Select(m => m.Groups["q"].Value.Trim()).ToList();
+                // Fact-first minutes cite numbered source units (〔B012・B013〕) instead of quoting.
+                foreach (Match refs in SourceRefs().Matches(content))
+                {
+                    quotes.AddRange(refs.Groups["ids"].Value.Split('・').Select(id => numbered.GetValueOrDefault(id.Trim(), string.Empty)));
+                }
+
+                withoutQuotes = SourceRefs().Replace(withoutQuotes, string.Empty).Trim();
                 string head = withoutQuotes.Split(['—', '／'], 2)[0].Trim().TrimEnd('-', ' ');
                 if (Placeholder().IsMatch(withoutQuotes) || TemplateWords.Contains(head)
                     || quotes.Any(q => q.Length == 0 || q is "…" or "..." or "〇〇"))
@@ -214,10 +222,25 @@ public static partial class MinutesQuality
         return result;
     }
 
+    [GeneratedRegex(@"〔(?<ids>[AB]\d{3}(・[AB]\d{3})*)〕")]
+    private static partial Regex SourceRefs();
+
+    [GeneratedRegex(@"^- (?<id>[AB]\d{3}) (?<text>.*)$", RegexOptions.Multiline)]
+    private static partial Regex NumberedLine();
+
+    /// <summary>The numbered source after fact-first minutes (id → text); empty for other layouts.</summary>
+    private static Dictionary<string, string> NumberedSource(string markdown)
+    {
+        int at = markdown.IndexOf("## 原文（番号付き）", StringComparison.Ordinal);
+        return at < 0
+            ? []
+            : NumberedLine().Matches(markdown.Replace("\r\n", "\n")[at..]).ToDictionary(m => m.Groups["id"].Value, m => m.Groups["text"].Value.Trim());
+    }
+
     /// <summary>The minutes part of a note (without the correction appendix).</summary>
     private static string ExportBody(string markdown)
     {
-        int appendix = markdown.IndexOf("\n---\n\n## 校正の記録", StringComparison.Ordinal);
+        int appendix = MinutesValidator.AppendixStart(markdown);
         return appendix >= 0 ? markdown[..appendix] : markdown;
     }
 

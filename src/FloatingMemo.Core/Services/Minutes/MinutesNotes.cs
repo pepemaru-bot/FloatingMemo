@@ -49,7 +49,7 @@ public sealed class FakeMinutesModel : ILocalTextGenerator
         await Task.Delay(500, cancellationToken).ConfigureAwait(false);
         for (int i = 1; i <= 4; i++)
         {
-            await Task.Delay(250, cancellationToken).ConfigureAwait(false); // long enough to test cancelling
+            await Task.Delay(500, cancellationToken).ConfigureAwait(false); // long enough to test cancelling and to see each step
             progress?.Report(i * 40);
         }
 
@@ -77,6 +77,20 @@ public sealed class FakeMinutesModel : ILocalTextGenerator
             }
 
             return lines.Count == 0 ? "なし" : string.Join("\n", lines);
+        }
+
+        if (system == FactPrompt.System)
+        {
+            // Fact extraction: the first numbered sentence as a decision, plus a task with an
+            // invented assignee the checks must remove.
+            string src = user.Split("<原文>\n")[^1].Split("\n</原文>")[0];
+            var firstUnit = src.Split('\n').FirstOrDefault(l => l.StartsWith('B')) ?? src.Split('\n').FirstOrDefault(l => l.StartsWith('A')) ?? "B001 なし";
+            string id = firstUnit.Split(' ')[0];
+            string said = firstUnit[(id.Length + 1)..].TrimEnd('。');
+            return $$"""
+                {"type":"決定","topic":"{{said[..Math.Min(8, said.Length)]}}","text":"{{said}}","src":["{{id}}"],"who":"","due":""}
+                {"type":"作業","topic":"{{said[..Math.Min(8, said.Length)]}}","text":"確認","src":["{{id}}"],"who":"架空太郎","due":""}
+                """;
         }
 
         string first = transcript.Split('。')[0];

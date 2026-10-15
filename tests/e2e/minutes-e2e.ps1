@@ -59,9 +59,9 @@ try {
   $file = MinutesFiles | Select-Object -First 1
   $text = if ($file) { [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8) } else { '' }
   Check "minutes saved as Markdown with the AI-draft notice and a link to the source" ($text -match 'AI下書き' -and $text.Contains("[[$source]]")) (Esc $text.Substring(0, [Math]::Min(200, $text.Length)))
-  # The test model gets the topic layout (only Qwen3 1.7B keeps the seven fixed headings).
-  Check "topic layout: overview, a topic heading, marks; no fixed template" ($text.Contains('## 概要') -and $text.Contains('【決定】') -and $text.Contains('- [ ] 確認') -and -not $text.Contains('## 次回確認事項'))
-  Check "invented assignee removed -> 未確認" (-not $text.Contains('架空太郎') -and $text.Contains('担当: 未確認（AIの推測を除去）'))
+  # The test model gets the fact-first layout (only Qwen3 1.7B keeps the seven fixed headings).
+  Check "fact-first layout: overview, a topic, marks, source numbers; no fixed template" ($text.Contains('## 概要') -and $text.Contains('【決定】') -and $text.Contains('- [ ] 確認') -and $text -match '〔[AB]\d{3}〕' -and $text.Contains('## 原文（番号付き）') -and -not $text.Contains('## 次回確認事項'))
+  Check "invented assignee removed -> 未確認" (-not $text.Contains('架空太郎') -and $text.Contains('担当: 未確認') -and $text.Contains('AIの推測'))
   Check "transcript note unchanged (byte for byte)" ([Convert]::ToBase64String([IO.File]::ReadAllBytes($sourceFile)) -eq [Convert]::ToBase64String($before))
 
   $create = MenuItem 'MinutesCreate'

@@ -994,6 +994,25 @@ public sealed partial class MainPage : Page
         clear.Start();
     }
 
+    private RadioMenuFlyoutItem FormatItem(string text, string? templateId, bool selected)
+    {
+        var item = new RadioMenuFlyoutItem { Text = text, GroupName = "MinutesFormat", IsChecked = selected };
+        AutomationProperties.SetAutomationId(item, templateId is null ? "MinutesFormatAuto" : "MinutesFormat-" + templateId);
+        // Saved whenever the item becomes checked: by mouse, keyboard or accessibility tools
+        // (which toggle the item without a click).
+        item.RegisterPropertyChangedCallback(ToggleMenuFlyoutItem.IsCheckedProperty, (_, _) =>
+        {
+            if (_services is null || !item.IsChecked || _services.Preferences.MinutesTemplateId == templateId)
+            {
+                return;
+            }
+
+            _services.Preferences.MinutesTemplateId = templateId;
+            _services.Settings.TrySave(_services.Preferences);
+        });
+        return item;
+    }
+
     /// <summary>The menu reflects the open note: create minutes from a transcript, or switch to its pair.</summary>
     private void OnMinutesMenuOpening(object? sender, object e)
     {
@@ -1009,6 +1028,22 @@ public sealed partial class MainPage : Page
         AutomationProperties.SetAutomationId(create, "MinutesCreate");
         create.Click += async (_, _) => await CreateMinutesAsync();
         MinutesMenu.Items.Add(create);
+
+        // Layout: おまかせ (the layout chosen for the model) or one of the user's templates.
+        if (_services is not null)
+        {
+            var format = new MenuFlyoutSubItem { Text = "議事録の形式" };
+            AutomationProperties.SetAutomationId(format, "MinutesFormat");
+            var templates = _services.Templates.All();
+            string? chosen = templates.Any(t => t.Id == _services.Preferences.MinutesTemplateId) ? _services.Preferences.MinutesTemplateId : null;
+            format.Items.Add(FormatItem("おまかせ（会議の内容に合わせる）", null, chosen is null));
+            foreach (var t in templates)
+            {
+                format.Items.Add(FormatItem(t.Name, t.Id, t.Id == chosen));
+            }
+
+            MinutesMenu.Items.Add(format);
+        }
 
         var pair = PairOf(active);
         var toggle = new MenuFlyoutItem
@@ -1188,7 +1223,8 @@ public sealed partial class MainPage : Page
         try
         {
             string noteId = source.Id;
-            var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName)).GenerateAsync(transcript, sourceTitle, DateTime.Now,
+            var template = _services.Templates.Find(_services.Preferences.MinutesTemplateId); // null = おまかせ
+            var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName), template).GenerateAsync(transcript, sourceTitle, DateTime.Now,
                 minutesProgress, cts.Token, dictionary, noteId));
             draft.Run?.Append(DateTime.Now); // sizes, parts and finish reasons only (%TEMP%, not the note text)
             var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), draft.Markdown);

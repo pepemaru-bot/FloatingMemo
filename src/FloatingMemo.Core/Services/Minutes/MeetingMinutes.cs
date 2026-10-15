@@ -32,14 +32,20 @@ public sealed record MinutesDraft(string Markdown, IReadOnlyList<string> Warning
 
     /// <summary>How the draft was made (sizes, parts, calls): for the diagnostics log.</summary>
     public MinutesRun? Run { get; init; }
+
+    /// <summary>The checked facts the draft was written from (fact-first layout only).</summary>
+    public IReadOnlyList<Fact>? Facts { get; init; }
 }
 
 /// <summary>
 /// Turns a transcript into a minutes draft with a local model, then checks the draft against
 /// the transcript (see <see cref="MinutesValidator"/>). The transcript itself is never changed.
 /// </summary>
-public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle style = MinutesStyle.FixedSections)
+/// <param name="template">A user template: its headings and rules replace the layout's own (notes passed apart, like Topics).</param>
+public sealed partial class MinutesGenerator(ILocalTextGenerator model, MinutesStyle style = MinutesStyle.FixedSections, MinutesTemplate? template = null)
 {
+    private readonly MinutesStyle _style = template is null ? style : MinutesStyle.Topics;
+
     /// <summary>Longer transcripts are processed in parts (small models lose track of long input).</summary>
     public const int ChunkCharacters = 6000;
 
@@ -56,8 +62,8 @@ public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle sty
         {
             Input = MinutesInputSnapshot.Of(noteId, transcript),
             Model = model.ModelName,
-            Style = style,
-            Settings = $"chunk={ChunkCharacters} correct={(dictionary is null ? "off" : "on")}",
+            Style = _style,
+            Settings = $"chunk={ChunkCharacters} correct={(dictionary is null ? "off" : "on")} template={(template is null ? "none" : template.Id)}",
         };
         var counted = new CountingGenerator(model, run);
 
@@ -69,12 +75,17 @@ public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle sty
             input = correction.Clean;
         }
 
+        if (_style == MinutesStyle.Facts)
+        {
+            return await GenerateFromFactsAsync(transcript, input, correction, sourceTitle, now, run, counted, progress, cancellationToken).ConfigureAwait(false);
+        }
+
         // Topic style: the person's own notes are passed apart from the transcript (as context).
         // Very long notes are not (they would be repeated with every part): the whole note is
         // then summarized as one text. Nothing is cut either way.
         string notes = string.Empty;
         run.InputMode = "whole-note";
-        if (style == MinutesStyle.Topics && NoteSections.Split(input) is { Transcripts.Count: > 0 } note)
+        if (_style == MinutesStyle.Topics && NoteSections.Split(input) is { Transcripts.Count: > 0 } note)
         {
             if (note.HumanNotes.Length <= TopicPrompt.MaxSeparateNotesCharacters)
             {
@@ -97,7 +108,10 @@ public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle sty
             progress?.Report(new MinutesProgress("議事録を作成", part + 1, chunks.Count, 0, false));
             var generated = progress is null ? null : new SynchronousProgress<int>(n =>
                 progress.Report(new MinutesProgress("議事録を作成", part + 1, chunks.Count, Math.Max(0, n), n < 0)));
-            string answer = style == MinutesStyle.Topics
+            string answer = template is not null
+                ? await counted.CompleteAsync(TemplatePrompt.System(template), TopicPrompt.User(notes, chunks[i], i, chunks.Count),
+                    TemplatePrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false)
+                : _style == MinutesStyle.Topics
                 ? await counted.CompleteAsync(TopicPrompt.System, TopicPrompt.User(notes, chunks[i], i, chunks.Count),
                     TopicPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false)
                 : await counted.CompleteAsync(MinutesPrompt.System, MinutesPrompt.User(chunks[i], i, chunks.Count),
@@ -124,7 +138,9 @@ public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle sty
         string said = NoteSections.Split(transcript) is { Transcripts.Count: > 0 } original
             ? original.AllTranscripts + "\n" + input
             : source;
-        string body = style == MinutesStyle.Topics
+        string body = template is not null
+            ? TemplateMinutes.Check(template, parts, said, notes + "\n" + said, warnings)
+            : _style == MinutesStyle.Topics
             ? TopicMinutes.Check(TopicMinutes.Merge(parts), said, notes + "\n" + said, warnings)
             : MinutesValidator.Check(MinutesValidator.Merge(parts), source, warnings);
         if (correction is not null)
@@ -135,6 +151,75 @@ public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle sty
         }
 
         return new MinutesDraft(MinutesValidator.Document(body, sourceTitle, model.ModelName, now, chunks.Count), warnings) { Correction = correction, Run = run };
+    }
+}
+
+/// <summary>The fact-first pipeline (<see cref="MinutesStyle.Facts"/>).</summary>
+public sealed partial class MinutesGenerator
+{
+    private static async Task<MinutesDraft> GenerateFromFactsAsync(string original, string input, CorrectedTranscript? correction,
+        string sourceTitle, DateTime now, MinutesRun run, ILocalTextGenerator model, IProgress<MinutesProgress>? progress, CancellationToken cancellationToken)
+    {
+        // A note without a transcript block is all notes: its facts are marked as taken from them.
+        var units = SourceUnits.From(NoteSections.Split(input));
+        var byId = units.ToDictionary(u => u.Id);
+        var parts = FactMinutes.Group(units);
+        run.InputMode = "facts";
+        for (int i = 0; i < parts.Count; i++)
+        {
+            run.Ranges.Add((units.IndexOf(parts[i][0]), units.IndexOf(parts[i][^1]) + 1));
+        }
+
+        if (parts.Sum(p => p.Count) != units.Count)
+        {
+            run.Unprocessed.Add((0, units.Count)); // cannot happen: every unit is in exactly one part
+        }
+
+        var facts = new List<Fact>();
+        int malformed = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            int part = i;
+            progress?.Report(new MinutesProgress("議事録を作成", part + 1, parts.Count, 0, false));
+            var generated = progress is null ? null : new SynchronousProgress<int>(n =>
+                progress.Report(new MinutesProgress("議事録を作成", part + 1, parts.Count, Math.Max(0, n), n < 0)));
+            string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.User(FactMinutes.ContextBefore(parts, i), parts[i], i, parts.Count),
+                FactPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
+            var allowed = parts[i].Select(u => u.Id).ToHashSet();
+            facts.AddRange(FactMinutes.Parse(answer, out int bad).Select(f => FactMinutes.Check(f, byId, allowed)));
+            malformed += bad;
+        }
+
+        var warnings = new List<string>();
+        if (malformed > 0)
+        {
+            warnings.Add($"AIの回答のうち {malformed} 行を読み取れませんでした。");
+        }
+
+        if (run.Truncated)
+        {
+            warnings.Add("AIの回答が長さの上限で途中で終わった部分があります。議事録に載っていない内容があるかもしれません。");
+        }
+
+        var topics = FactMinutes.Merge(facts);
+        var uncited = FactMinutes.Uncited(units, facts);
+        if (uncited.Count > 0)
+        {
+            warnings.Add($"議事録のどの項目にも使われていない発言があります（{string.Join("、", uncited)}）。");
+        }
+
+        string body = FactMinutes.Render(topics, byId, [], warnings) + FactMinutes.SourceAppendix(units, uncited);
+        if (correction is not null)
+        {
+            body += MinutesValidator.CorrectionAppendix(correction);
+        }
+
+        return new MinutesDraft(MinutesValidator.Document(body, sourceTitle, model.ModelName, now, parts.Count), warnings)
+        {
+            Correction = correction,
+            Run = run,
+            Facts = facts,
+        };
     }
 }
 
@@ -472,6 +557,16 @@ public static partial class MinutesValidator
         sb.Append(CorrectedTextMarker).Append('\n');
         sb.Append(correction.Annotated.Trim()).Append('\n');
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Where the appendices after the minutes start (the numbered source, the correction log):
+    /// they are for checking, not part of the minutes when exported or evaluated. -1 = none.
+    /// </summary>
+    public static int AppendixStart(string markdown)
+    {
+        string[] markers = ["\n---\n\n## 校正の記録", "\n---\n\n## 原文（番号付き）"];
+        return markers.Select(m => markdown.IndexOf(m, StringComparison.Ordinal)).Where(i => i >= 0).DefaultIfEmpty(-1).Min();
     }
 
     /// <summary>Line that starts the corrected transcript (used to find it again for learning).</summary>

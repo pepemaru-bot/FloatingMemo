@@ -102,7 +102,7 @@ public static class Coverage
 {
     public static string Body(string markdown)
     {
-        int appendix = markdown.IndexOf("\n---\n\n## 校正の記録", StringComparison.Ordinal);
+        int appendix = MinutesValidator.AppendixStart(markdown);
         string body = appendix >= 0 ? markdown[..appendix] : markdown;
         int start = body.IndexOf("\n## ", StringComparison.Ordinal);
         return start >= 0 ? body[start..] : body;

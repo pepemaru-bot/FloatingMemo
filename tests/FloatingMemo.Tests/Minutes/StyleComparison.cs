@@ -39,9 +39,10 @@ public sealed class StyleComparison(ITestOutputHelper output)
 
             foreach (var meeting in Meetings)
             {
-                foreach (var style in new[] { MinutesStyle.FixedSections, MinutesStyle.Topics })
+                foreach (var style in Styles())
                 {
-                    using var model = new LlamaTextGenerator(path);
+                    using var llm = new LlamaTextGenerator(path);
+                    var model = new RecordingGenerator(llm); // raw answers for the report (FLOATINGMEMO_LLM_RAW=1)
                     var watch = Stopwatch.StartNew();
                     var draft = await new MinutesGenerator(model, style).GenerateAsync(meeting.Note, meeting.Title, new DateTime(2026, 10, 15, 9, 0, 0),
                         dictionary: meeting.Correct ? EvaluationMeeting.Dictionary : null);
@@ -72,7 +73,7 @@ public sealed class StyleComparison(ITestOutputHelper output)
                     }
 
                     bool leaked = body.Contains("自分用", StringComparison.Ordinal) || body.Contains("後で読む", StringComparison.Ordinal);
-                    string label = style == MinutesStyle.Topics ? "話題ごと" : "固定 7 見出し";
+                    string label = style switch { MinutesStyle.Topics => "話題ごと", MinutesStyle.Facts => "事実抽出", _ => "固定 7 見出し" };
                     table.Append($"| {name.Replace(".gguf", string.Empty)} | {meeting.Name} | {label} | {watch.Elapsed.TotalSeconds:0} 秒 | {quality.Items} | "
                         + string.Join(" | ", QualityReport.Kinds.Select(k => quality.Count(k).ToString()))
                         + $" | {invented} | {expected} | {notDecided} | {todo} | {topics} | {(leaked ? "あり" : "なし")} |\n");
@@ -84,6 +85,13 @@ public sealed class StyleComparison(ITestOutputHelper output)
                     }
 
                     drafts.Append("\n```markdown\n").Append(draft.Markdown).Append("\n```\n");
+                    if (Environment.GetEnvironmentVariable("FLOATINGMEMO_LLM_RAW") == "1")
+                    {
+                        foreach (var (_, answer, chars) in model.Calls)
+                        {
+                            drafts.Append($"\n生の回答（{chars} 文字、終了: {llm.LastFinish}）:\n```\n{answer}\n```\n");
+                        }
+                    }
                     output.WriteLine($"{name} {meeting.Name} {label}: {watch.Elapsed.TotalSeconds:0}s");
                 }
             }
@@ -99,6 +107,11 @@ public sealed class StyleComparison(ITestOutputHelper output)
         output.WriteLine(file);
         output.WriteLine(table.ToString());
     }
+
+    /// <summary>FLOATINGMEMO_LLM_STYLES limits the layouts (e.g. "Topics,Facts").</summary>
+    private static IEnumerable<MinutesStyle> Styles() =>
+        (Environment.GetEnvironmentVariable("FLOATINGMEMO_LLM_STYLES") ?? "FixedSections,Topics,Facts")
+            .Split(',').Select(s => Enum.Parse<MinutesStyle>(s.Trim()));
 
     /// <summary>Decision and task lines in either layout.</summary>
     private static (List<string> Decisions, List<string> Tasks) DecisionsAndTasks(string body)

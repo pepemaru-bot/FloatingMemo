@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using FloatingMemo.Services.Acceleration;
 using Whisper.net;
+using Whisper.net.LibraryLoader;
 
 namespace FloatingMemo.Services.Transcription;
 
@@ -203,7 +205,21 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
         }
 
         // Loading reads ~150 MB (base) from disk; keep it off the UI thread.
-        _factory = await Task.Run(() => WhisperFactory.FromPath(ModelPath), cancellationToken).ConfigureAwait(false);
+        // GPU (Vulkan) when the policy says so; if that fails to start, the CPU — never an error.
+        var choice = AccelerationPolicy.ForWhisper(AccelerationState.Mode, AccelerationState.Adapters);
+        try
+        {
+            _factory = await Task.Run(() => WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { UseGpu = choice.UseGpu }), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (choice.UseGpu && ex is not OperationCanceledException)
+        {
+            _factory = await Task.Run(() => WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { UseGpu = false }), cancellationToken).ConfigureAwait(false);
+            choice = choice with { UseGpu = false, Backend = "CPU", Reason = "GPU で開始できず CPU に切り替え" };
+        }
+
+        // Which native library was really loaded (Vulkan or CPU) is what the report shows.
+        string loaded = RuntimeOptions.LoadedLibrary?.ToString() ?? "unknown";
+        AccelerationState.Record(choice with { Backend = $"{(choice.UseGpu ? "GPU" : "CPU")} / {loaded}" });
         return _factory;
     }
 

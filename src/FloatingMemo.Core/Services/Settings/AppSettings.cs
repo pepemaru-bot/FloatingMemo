@@ -22,6 +22,9 @@ public sealed class AppSettings
     /// <summary>File name of the Qwen model for AI minutes (null = the best one available).</summary>
     public string? MinutesModel { get; set; }
 
+    /// <summary>Id of the user's minutes template (null = おまかせ: the layout chosen for the model).</summary>
+    public string? MinutesTemplateId { get; set; }
+
     /// <summary>Correct the transcript with the dictionary and context before writing minutes.</summary>
     public bool CorrectTranscriptBeforeMinutes { get; set; } = true;
 
@@ -30,6 +33,9 @@ public sealed class AppSettings
 
     /// <summary>Paper (memo body) color: 0 = white, 1 = milky blue-grey frosted-glass tone.</summary>
     public double PaperMilkiness { get; set; } = 0.6;
+
+    /// <summary>GPU use for Whisper and Qwen (applies after a restart).</summary>
+    public FloatingMemo.Services.Acceleration.AccelerationMode Acceleration { get; set; } = FloatingMemo.Services.Acceleration.AccelerationMode.Auto;
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]

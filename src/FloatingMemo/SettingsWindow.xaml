@@ -18,6 +18,7 @@
             <SelectorBarItem x:Name="ModelSection" AutomationProperties.AutomationId="SettingsModels" IsSelected="True" Text="AIモデル" />
             <SelectorBarItem x:Name="DictionarySection" AutomationProperties.AutomationId="SettingsDictionary" Text="専門用語辞書" />
             <SelectorBarItem x:Name="CandidateSection" AutomationProperties.AutomationId="SettingsCandidates" Text="登録候補" />
+            <SelectorBarItem x:Name="TemplateSection" AutomationProperties.AutomationId="SettingsTemplates" Text="議事録テンプレート" />
             <SelectorBarItem x:Name="AppearanceSection" AutomationProperties.AutomationId="SettingsAppearance" Text="見た目" />
         </SelectorBar>
 
@@ -39,6 +40,22 @@
                     IsTextSelectionEnabled="True"
                     TextWrapping="Wrap" />
                 <Button Click="OnOpenModelsFolder" Content="モデルのフォルダを開く" />
+                <ComboBox
+                    x:Name="AccelerationBox"
+                    AutomationProperties.AutomationId="AccelerationBox"
+                    Header="文字起こし・AI議事録の処理（GPU）"
+                    SelectionChanged="OnAccelerationChanged">
+                    <ComboBoxItem Content="自動（推奨）" />
+                    <ComboBoxItem Content="GPU 優先" />
+                    <ComboBoxItem Content="CPU のみ" />
+                </ComboBox>
+                <TextBlock
+                    x:Name="AccelerationReport"
+                    AutomationProperties.AutomationId="AccelerationReport"
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    IsTextSelectionEnabled="True"
+                    TextWrapping="Wrap" />
                 <ToggleSwitch
                     x:Name="CorrectToggle"
                     AutomationProperties.AutomationId="CorrectToggle"
@@ -151,6 +168,42 @@
         </Grid>
 
         <!-- ===== Candidates ===== -->
+        <Grid x:Name="TemplatePanel" Grid.Row="1" RowSpacing="8" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="議事録の見出しと書き方を、Markdown（## 見出し と説明）か JSON で読み込めます。テンプレートはこの PC のノートのフォルダにだけ保存されます。使うテンプレートは、議事録ボタンの「議事録の形式」で選びます。"
+                TextWrapping="Wrap" />
+            <ComboBox
+                x:Name="TemplateList"
+                Grid.Row="1"
+                MinWidth="320"
+                AutomationProperties.AutomationId="TemplateList"
+                SelectionChanged="OnTemplateSelected" />
+            <TextBox
+                x:Name="TemplateJson"
+                Grid.Row="2"
+                AcceptsReturn="True"
+                AutomationProperties.AutomationId="TemplateJson"
+                FontFamily="Consolas"
+                FontSize="12"
+                Header="内容（JSON。編集して「保存」）"
+                IsSpellCheckEnabled="False"
+                TextWrapping="Wrap" />
+            <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
+                <Button AutomationProperties.AutomationId="ImportTemplate" Click="OnImportTemplate" Content="読み込む（.md / .json）" Style="{ThemeResource AccentButtonStyle}" />
+                <Button AutomationProperties.AutomationId="SaveTemplate" Click="OnSaveTemplate" Content="保存" />
+                <Button AutomationProperties.AutomationId="DuplicateTemplate" Click="OnDuplicateTemplate" Content="複製" />
+                <Button AutomationProperties.AutomationId="ExportTemplate" Click="OnExportTemplate" Content="書き出す（.json）" />
+                <Button AutomationProperties.AutomationId="DeleteTemplate" Click="OnDeleteTemplate" Content="削除" />
+            </StackPanel>
+        </Grid>
+
         <Grid x:Name="CandidatePanel" Grid.Row="1" RowSpacing="8" Visibility="Collapsed">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
