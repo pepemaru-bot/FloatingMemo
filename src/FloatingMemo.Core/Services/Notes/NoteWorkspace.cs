@@ -437,9 +437,13 @@ public sealed class NoteWorkspace
     /// Routes a finished transcript to the note that was active when recording started, even if
     /// the user has switched tabs or closed it since. Never drops the text.
     /// </summary>
-    public async Task<(TranscriptDelivery Delivery, OpenNote? Tab)> DeliverTranscript(string targetId, string transcript)
+    /// <param name="editorRefused">
+    /// The editor could not insert it (it showed another note by then): append it to the note's
+    /// text here instead, even if it is the active tab; the page then shows the note again.
+    /// </param>
+    public async Task<(TranscriptDelivery Delivery, OpenNote? Tab)> DeliverTranscript(string targetId, string transcript, bool editorRefused = false)
     {
-        if (Active?.Id == targetId)
+        if (Active?.Id == targetId && !editorRefused)
         {
             return (TranscriptDelivery.InsertIntoActiveEditor, Active);
         }

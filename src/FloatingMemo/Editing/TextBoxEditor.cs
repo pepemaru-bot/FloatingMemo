@@ -86,7 +86,10 @@ internal sealed class TextBoxEditor : IMemoEditor
 
     public void Focus() => _box.Focus(FocusState.Programmatic);
 
-    public Task FlushAsync(bool settle = false) => Task.CompletedTask; // every change is reported synchronously
+    public Task<bool> FlushAsync(bool settle = false) => Task.FromResult(true); // every change is reported synchronously
+
+    // Inserting into a TextBox cannot be refused.
+    public event EventHandler<EditorTextChange>? InsertRejected { add { } remove { } }
 
     private void Report()
     {

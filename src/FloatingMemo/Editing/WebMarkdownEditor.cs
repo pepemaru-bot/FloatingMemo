@@ -39,6 +39,8 @@ internal sealed class WebMarkdownEditor : IMemoEditor
 
     public event EventHandler<bool>? CompositionChanged;
 
+    public event EventHandler<EditorTextChange>? InsertRejected;
+
     public event EventHandler<string>? CommandInvoked;
 
     /// <summary>Focus moved into / out of the editor (used by test hooks).</summary>
@@ -217,6 +219,14 @@ internal sealed class WebMarkdownEditor : IMemoEditor
                 break;
             }
 
+            case "insertRejected":
+                // The page showed another note when the transcript arrived: hand it back.
+                if (Str(message, "id") is { } rejectedId && Str(message, "text") is { Length: <= MaxTextLength } rejectedText)
+                {
+                    InsertRejected?.Invoke(this, new EditorTextChange(rejectedId, rejectedText, 0));
+                }
+
+                break;
             case "caretStyle":
                 if (Str(message, "color") is { Length: <= 64 } color)
                 {
@@ -304,11 +314,12 @@ internal sealed class WebMarkdownEditor : IMemoEditor
         Post(new JsonObject { ["type"] = "focus" });
     }
 
-    public async Task FlushAsync(bool settle = false)
+    public async Task<bool> FlushAsync(bool settle = false)
     {
         _flush = new TaskCompletionSource();
         Post(new JsonObject { ["type"] = "flush", ["settle"] = settle });
-        await Task.WhenAny(_flush.Task, Task.Delay(1000)); // on timeout the last reported text is used
+        // On timeout the last reported text is used; the caller learns that it was not confirmed.
+        return await Task.WhenAny(_flush.Task, Task.Delay(1000)) == _flush.Task;
     }
 
     private void Post(JsonObject message)

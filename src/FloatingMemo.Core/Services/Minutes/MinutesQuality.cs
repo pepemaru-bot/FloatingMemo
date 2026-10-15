@@ -87,7 +87,8 @@ public sealed record QualityReport(IReadOnlyList<QualityIssue> Issues, int Items
 /// </summary>
 public static partial class MinutesQuality
 {
-    [GeneratedRegex(@"[（(]原文[:：]\s*「(?<q>[^」]*)」[）)]")]
+    // Same as the validator: "（原文:「…」）" or just "(「…」)".
+    [GeneratedRegex(@"[（(]\s*(?:原文\s*[:：]\s*)?「(?<q>[^」]*)」\s*[）)]")]
     private static partial Regex Quote();
 
     [GeneratedRegex(@"\s*⚠要確認（[^）]*）")]
@@ -109,7 +110,7 @@ public static partial class MinutesQuality
 
     public static QualityReport Analyze(string minutesMarkdown, string transcript, IReadOnlyList<TermEntry>? dictionary = null)
     {
-        var sections = MinutesValidator.Parse(ExportBody(minutesMarkdown));
+        var sections = Sections(ExportBody(minutesMarkdown));
         string source = MinutesValidator.Normalize(transcript);
         var issues = new List<QualityIssue>();
         var seen = new List<(string Section, string Item, string Key)>();
@@ -177,6 +178,40 @@ public static partial class MinutesQuality
         }
 
         return new QualityReport(issues, items);
+    }
+
+    /// <summary>
+    /// Items grouped by what they are: the fixed headings as they are; in the topic style each
+    /// item goes by its mark (【決定】 → 決定事項, checkbox → ToDo, 【未決】 → 未決事項, else 議論の要点).
+    /// </summary>
+    private static List<(string Section, List<string> Lines)> Sections(string body)
+    {
+        var result = new List<(string Section, List<string> Lines)>();
+        string? heading = null;
+        foreach (string raw in body.Replace("\r\n", "\n").Split('\n'))
+        {
+            string line = raw.TrimEnd();
+            if (line.StartsWith("## ", StringComparison.Ordinal))
+            {
+                heading = line[3..].Trim();
+                continue;
+            }
+
+            if (heading is null || line.Trim().Length == 0)
+            {
+                continue;
+            }
+
+            string section = MinutesPrompt.Sections.Contains(heading) ? heading : TopicMinutes.KindOf(line, heading);
+            if (result.Count == 0 || result[^1].Section != section)
+            {
+                result.Add((section, []));
+            }
+
+            result[^1].Lines.Add(line);
+        }
+
+        return result;
     }
 
     /// <summary>The minutes part of a note (without the correction appendix).</summary>

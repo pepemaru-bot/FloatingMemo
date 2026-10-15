@@ -80,6 +80,17 @@ public sealed class FakeMinutesModel : ILocalTextGenerator
         }
 
         string first = transcript.Split('。')[0];
+        if (system == TopicPrompt.System)
+        {
+            return $"""
+                ## 概要
+                - {first}
+                ## {first[..Math.Min(8, first.Length)]}
+                - 【決定】{first}（原文:「{first}」）
+                - 【ToDo】確認 — 担当: 架空太郎 / 期限: 未確認（原文:「{first}」）
+                """;
+        }
+
         return $"""
             ## 会議の概要
             - {first}

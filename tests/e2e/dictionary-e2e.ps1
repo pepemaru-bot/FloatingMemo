@@ -65,6 +65,9 @@ try {
   # Minutes: correction step first, then minutes.
   for ($f = 0; $f -lt 3 -and [K]::GetForegroundWindow() -ne $script:h; $f++) { [K]::Combo(0x11, 0x10, 0x4D); Start-Sleep 1 }
   MinutesMenu 'MinutesCreate'
+  # The note has typed text only (no transcript block): confirm "メモだけで作成".
+  for ($i = 0; $i -lt 20 -and -not ($anyway = Find 'MinutesWithoutTranscript'); $i++) { Start-Sleep -Milliseconds 150 }
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
   for ($i = 0; $i -lt 80 -and -not ((InfoBarText 'AudioInfoBar') -match '下書きを作成しました'); $i++) { Start-Sleep -Milliseconds 250 }
   $info = InfoBarText 'AudioInfoBar'
   Check "minutes created" ($info -match '下書きを作成しました') $info
@@ -83,6 +86,8 @@ try {
   for ($f = 0; $f -lt 3 -and [K]::GetForegroundWindow() -ne $script:h; $f++) { [K]::Combo(0x11, 0x10, 0x4D); Start-Sleep 1 }
   MinutesMenu 'MinutesToggle'; Start-Sleep 0.5   # back to the transcript
   MinutesMenu 'MinutesCreate'
+  for ($i = 0; $i -lt 20 -and -not ($anyway = Find 'MinutesWithoutTranscript'); $i++) { Start-Sleep -Milliseconds 150 }
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
   for ($i = 0; $i -lt 80 -and -not ((InfoBarText 'AudioInfoBar') -match '下書きを作成しました'); $i++) { Start-Sleep -Milliseconds 250 }
   $second = Get-ChildItem (Join-Path $NotesDir 'notes') -Filter '*AI議事録*.md' | Sort-Object LastWriteTime | Select-Object -Last 1
   $text2 = [IO.File]::ReadAllText($second.FullName, [Text.Encoding]::UTF8)

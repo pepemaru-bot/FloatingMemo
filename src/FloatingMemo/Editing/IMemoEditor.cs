@@ -19,6 +19,12 @@ public interface IMemoEditor
     /// <summary>The IME started/finished composing.</summary>
     event EventHandler<bool>? CompositionChanged;
 
+    /// <summary>
+    /// A transcript the editor could not insert (it was showing another note by then). The page
+    /// must put it somewhere else; it is never dropped.
+    /// </summary>
+    event EventHandler<EditorTextChange>? InsertRejected;
+
     /// <summary>A shortcut pressed inside the editor: hide, new, close, save, next, previous, reopen, rename, record, focusOut.</summary>
     event EventHandler<string>? CommandInvoked;
 
@@ -37,5 +43,6 @@ public interface IMemoEditor
 
     /// <summary>Makes sure every keystroke typed so far has been reported via <see cref="TextChanged"/>.</summary>
     /// <param name="settle">Also wait briefly for keystrokes still queued in the editor (used before exiting).</param>
-    Task FlushAsync(bool settle = false);
+    /// <returns>True when the editor confirmed the current text of the note it shows; false when it did not answer in time.</returns>
+    Task<bool> FlushAsync(bool settle = false);
 }

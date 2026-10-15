@@ -432,6 +432,20 @@ public sealed class NoteWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Transcript_RefusedByTheEditor_IsAppendedToTheActiveNote_AndSaved()
+    {
+        var ws = NewWorkspace();
+        ws.UpdateText(ws.Active!.Id, "- 冒頭のメモ", 0);
+
+        var (delivery, tab) = await ws.DeliverTranscript(ws.Active.Id, "届いた文字起こし", editorRefused: true);
+
+        Assert.Equal(TranscriptDelivery.InsertedIntoOpenTab, delivery);
+        Assert.Same(ws.Active, tab);
+        Assert.Equal("- 冒頭のメモ\n\n以下、AIによる文字起こし\n届いた文字起こし", tab!.Text);
+        Assert.False(tab.IsDirty); // saved right away
+    }
+
+    [Fact]
     public async Task Transcript_AfterSwitchingTabs_GoesIntoTheRecordedNote()
     {
         var ws = NewWorkspace();

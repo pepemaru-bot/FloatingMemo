@@ -406,7 +406,8 @@ function load(id, text, caret, isReadOnly) {
 // Same rule as the C# TranscriptInsertion: the transcript becomes its own paragraph at the caret.
 function insertTranscript(text) {
   if (view.composing) {
-    pendingInsert = text;
+    // Several transcripts may arrive while composing: keep them all, in order.
+    pendingInsert = pendingInsert === null ? text : pendingInsert + '\n\n' + text;
     return;
   }
   insertTranscriptNow(text);
@@ -463,7 +464,10 @@ function handleHost(message) {
       }
       break;
     case 'insert':
-      if (message.id === currentId && isText(message.text)) insertTranscript(message.text);
+      if (!isText(message.text)) break;
+      // Never drop a transcript: if another note is shown by now, give it back to the host.
+      if (message.id === currentId) insertTranscript(message.text);
+      else post({ type: 'insertRejected', id: message.id, text: message.text });
       break;
     case 'forget':
       if (isId(message.id)) states.delete(message.id);

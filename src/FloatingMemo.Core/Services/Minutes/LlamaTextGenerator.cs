@@ -30,6 +30,8 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
 
     public string ModelName => Path.GetFileNameWithoutExtension(_modelPath);
 
+    public string LastFinish { get; private set; } = MinutesFinish.Unknown;
+
     /// <summary>Where the user is told to put Qwen models (see <see cref="ModelLocations"/>).</summary>
     public static string ModelsDirectory => ModelLocations.RecommendedDirectory(ModelLocations.QwenFolder);
 
@@ -121,12 +123,16 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
             };
 
             var answer = new StringBuilder();
+            int tokens = 0;
             await foreach (string piece in executor.InferAsync(ChatPrompt(system, user), inference, cancellationToken).ConfigureAwait(false))
             {
+                tokens++; // one piece per generated token
                 answer.Append(piece);
                 progress?.Report(answer.Length);
             }
 
+            // Reaching the token budget means the answer was cut off, not finished.
+            LastFinish = tokens >= maxTokens ? MinutesFinish.MaxTokens : MinutesFinish.End;
             return answer.ToString().Replace("<|im_end|>", string.Empty).Trim();
         }
         finally

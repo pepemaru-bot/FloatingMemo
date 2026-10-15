@@ -211,6 +211,7 @@ public sealed partial class MainPage : Page
     {
         editor.TextChanged += OnEditorTextChanged;
         editor.CompositionChanged += OnEditorCompositionChanged;
+        editor.InsertRejected += OnEditorInsertRejected;
         editor.CommandInvoked += async (_, name) => await ExecuteCommandAsync(name);
     }
 
@@ -1095,22 +1096,39 @@ public sealed partial class MainPage : Page
     /// Makes a minutes draft from the open note with the local LLM and saves it as a new note
     /// next to it. The transcript itself is never changed; the user reviews the draft.
     /// </summary>
-    private async Task CreateMinutesAsync()
+    /// <param name="withoutTranscript">The user confirmed making minutes from a note that has no transcript.</param>
+    private async Task CreateMinutesAsync(bool withoutTranscript = false)
     {
         if (_workspace?.Active is not { } source || _services is null || _minutesCts is not null)
         {
             return;
         }
 
-        if (VoiceState == VoiceState.Transcribing)
+        // The transcript is added only after recording, audio preparation and transcription have
+        // all finished. Starting earlier summarizes the note without it (input silently missing).
+        if (VoiceState != VoiceState.Idle)
         {
-            ShowAudioMessage(InfoBarSeverity.Warning, "文字起こしが終わってから作成してください", "AIの処理と文字起こしを同時に行うと、どちらも遅くなります。");
+            ShowAudioMessage(InfoBarSeverity.Warning, "録音と文字起こしが終わってから作成してください",
+                "文字起こしがノートに追加される前に作成すると、文字起こしの内容が議事録に入りません。");
+            return;
+        }
+
+        if (_transcriptsWaitingForIme.Count > 0 || IsComposing)
+        {
+            ShowAudioMessage(InfoBarSeverity.Warning, "日本語入力の変換を確定してください",
+                "変換中のため、届いた文字起こしをまだノートに追加していません。確定してから作成してください。");
             return;
         }
 
         // The latest keystrokes belong to the transcript that is summarized.
         _autosaveTimer.Stop();
-        await _editor.FlushAsync();
+        if (!await _editor.FlushAsync())
+        {
+            ShowAudioMessage(InfoBarSeverity.Warning, "エディタの内容を確認できませんでした",
+                "最新の本文を受け取れなかったため作成していません。少し待ってからもう一度お試しください。");
+            return;
+        }
+
         if (source.IsDirty)
         {
             HandleSaveResult(await _workspace.SaveAsync(source));
@@ -1120,6 +1138,24 @@ public sealed partial class MainPage : Page
         if (transcript.Trim().Length < 20)
         {
             ShowAudioMessage(InfoBarSeverity.Warning, "原文が短すぎます", "文字起こしのあるノートで作成してください。");
+            return;
+        }
+
+        // A note without any "以下、AIによる文字起こし" block: say so instead of quietly making
+        // minutes from the person's notes alone.
+        var snapshot = MinutesInputSnapshot.Of(source.Id, transcript);
+        if (!snapshot.HasTranscript && !withoutTranscript)
+        {
+            var anyway = new Button { Content = "メモだけで作成" };
+            AutomationProperties.SetAutomationId(anyway, "MinutesWithoutTranscript");
+            anyway.Click += async (_, _) =>
+            {
+                AudioInfoBar.IsOpen = false;
+                await CreateMinutesAsync(withoutTranscript: true);
+            };
+            ShowAudioMessage(InfoBarSeverity.Warning, "このノートには文字起こしがありません",
+                "「以下、AIによる文字起こし」の部分が見つかりません。録音の文字起こしが別のノートに入っていないか確認してください。"
+                + "手で書いたメモだけから作る場合は「メモだけで作成」を押してください。", anyway);
             return;
         }
 
@@ -1151,8 +1187,10 @@ public sealed partial class MainPage : Page
         });
         try
         {
-            var draft = await Task.Run(() => new MinutesGenerator(model).GenerateAsync(transcript, sourceTitle, DateTime.Now,
-                minutesProgress, cts.Token, dictionary));
+            string noteId = source.Id;
+            var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName)).GenerateAsync(transcript, sourceTitle, DateTime.Now,
+                minutesProgress, cts.Token, dictionary, noteId));
+            draft.Run?.Append(DateTime.Now); // sizes, parts and finish reasons only (%TEMP%, not the note text)
             var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), draft.Markdown);
             HandleSaveResult(saved);
             if (draft.Correction is { } correction)
@@ -2013,21 +2051,33 @@ public sealed partial class MainPage : Page
     /// <summary>Puts the transcript into the note the recording belongs to.</summary>
     private async Task DeliverTranscriptAsync(string transcript)
     {
+        if ((_recordingNoteId ?? _workspace?.Active?.Id) is { } target)
+        {
+            await DeliverTranscriptToAsync(target, transcript);
+        }
+    }
+
+    private async Task DeliverTranscriptToAsync(string target, string transcript, bool editorRefused = false)
+    {
         if (_workspace is null)
         {
             return;
         }
 
-        if ((_recordingNoteId ?? _workspace.Active?.Id) is not { } target)
+        if (editorRefused && _workspace.Active?.Id == target)
         {
-            return;
+            await _editor.FlushAsync(); // keep what was typed; the note is then shown again below
         }
 
-        var (delivery, tab) = await _workspace.DeliverTranscript(target, transcript);
+        var (delivery, tab) = await _workspace.DeliverTranscript(target, transcript, editorRefused);
         switch (delivery)
         {
             case TranscriptDelivery.InsertIntoActiveEditor:
-                InsertTranscript(transcript);
+                InsertTranscript(target, transcript);
+                break;
+            case TranscriptDelivery.InsertedIntoOpenTab when ReferenceEquals(tab, _workspace.Active):
+                _editor.Show(tab!); // the text changed under the editor
+                ShowAudioMessage(InfoBarSeverity.Success, "文字起こしを追加しました", "ノートの末尾に追加しました。");
                 break;
             case TranscriptDelivery.InsertedIntoOpenTab:
                 ShowAudioMessage(InfoBarSeverity.Success, "文字起こしを追加しました", $"「{tab!.Title}」タブの末尾に追加しました。",
@@ -2084,20 +2134,22 @@ public sealed partial class MainPage : Page
     // A transcript that arrived while the IME was composing. When composition ends it is
     // routed again through the workspace, so it still lands in the recorded note even if the
     // user switched tabs in between.
-    private string? _transcriptWaitingForIme;
+    // Each one keeps the note it was recorded for; several can wait (none is overwritten).
+    private readonly List<(string Target, string Text)> _transcriptsWaitingForIme = [];
 
-    private void InsertTranscript(string transcript)
+    /// <summary>Inserts a transcript into the active editor; <paramref name="target"/> is the note it belongs to.</summary>
+    private void InsertTranscript(string target, string transcript)
     {
         if (IsComposing)
         {
             // Inserting text mid-conversion would break the IME; wait until it finishes.
-            _transcriptWaitingForIme = transcript;
+            _transcriptsWaitingForIme.Add((target, transcript));
             return;
         }
 
-        if (_workspace?.Active is not { } active || active.Id != (_recordingNoteId ?? active.Id))
+        if (_workspace?.Active is not { } active || active.Id != target)
         {
-            _ = DeliverTranscriptAsync(transcript); // the target is no longer the active tab
+            _ = DeliverTranscriptToAsync(target, transcript); // the target is no longer the active tab
             return;
         }
 
@@ -2116,12 +2168,35 @@ public sealed partial class MainPage : Page
         _ = FlushAsync();
     }
 
+    /// <summary>The editor showed another note when the transcript arrived: put it into its note another way.</summary>
+    private async void OnEditorInsertRejected(object? sender, EditorTextChange rejected)
+    {
+        if (!ReferenceEquals(sender, _editor))
+        {
+            return;
+        }
+
+        string transcript = rejected.Text.StartsWith(TranscriptInsertion.Header, StringComparison.Ordinal)
+            ? rejected.Text[TranscriptInsertion.Header.Length..].Trim()
+            : rejected.Text;
+        await DeliverTranscriptToAsync(rejected.NoteId, transcript, editorRefused: true);
+    }
+
     private void OnEditorCompositionChanged(object? sender, bool composing)
     {
-        if (!composing && ReferenceEquals(sender, _editor) && _transcriptWaitingForIme is { } transcript)
+        if (!composing && ReferenceEquals(sender, _editor) && _transcriptsWaitingForIme.Count > 0)
         {
-            _transcriptWaitingForIme = null;
-            _ = DeliverTranscriptAsync(transcript);
+            var waiting = _transcriptsWaitingForIme.ToList();
+            _transcriptsWaitingForIme.Clear();
+            _ = DeliverWaitingAsync(waiting);
+        }
+    }
+
+    private async Task DeliverWaitingAsync(List<(string Target, string Text)> waiting)
+    {
+        foreach (var (target, text) in waiting)
+        {
+            await DeliverTranscriptToAsync(target, text);
         }
     }
 
@@ -2173,7 +2248,9 @@ public sealed partial class MainPage : Page
         BusyRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         BusyRing.IsActive = busy;
         var pulse = (Storyboard)Resources["RecordingPulse"];
-        if (recording)
+        // Windows "Animation effects" off: a steady red dot (a looping pulse is exactly the kind
+        // of motion that setting asks to avoid). The "録音中" text says the same either way.
+        if (recording && new Windows.UI.ViewManagement.UISettings().AnimationsEnabled)
         {
             pulse.Begin();
         }
@@ -2192,7 +2269,9 @@ public sealed partial class MainPage : Page
     private void UpdateControlBarEmphasis()
     {
         bool emphasize = _pointerOverControlBar || VoiceState != VoiceState.Idle || MinutesIndicator.Visibility == Visibility.Visible;
-        ControlBar.Opacity = emphasize ? 1.0 : 0.55;
+        // Quiet while typing, but still legible on the glass (0.55 made the icons hard to find
+        // over busy backgrounds).
+        ControlBar.Opacity = emphasize ? 1.0 : 0.72;
     }
 
     private void OnControlBarPointerEntered(object sender, PointerRoutedEventArgs e)

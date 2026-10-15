@@ -16,6 +16,9 @@ public interface ILocalTextGenerator
     /// percentage: how long an answer will be is not known in advance.
     /// </param>
     Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null);
+
+    /// <summary>Why the last answer ended (see <see cref="MinutesFinish"/>); for diagnostics.</summary>
+    string LastFinish => MinutesFinish.Unknown;
 }
 
 /// <summary>Where the minutes pipeline is (shown as text: step, part, characters; never a guessed %).</summary>
@@ -26,13 +29,16 @@ public sealed record MinutesDraft(string Markdown, IReadOnlyList<string> Warning
 {
     /// <summary>The correction step's result (null when correction was skipped).</summary>
     public CorrectedTranscript? Correction { get; init; }
+
+    /// <summary>How the draft was made (sizes, parts, calls): for the diagnostics log.</summary>
+    public MinutesRun? Run { get; init; }
 }
 
 /// <summary>
 /// Turns a transcript into a minutes draft with a local model, then checks the draft against
 /// the transcript (see <see cref="MinutesValidator"/>). The transcript itself is never changed.
 /// </summary>
-public sealed class MinutesGenerator(ILocalTextGenerator model)
+public sealed class MinutesGenerator(ILocalTextGenerator model, MinutesStyle style = MinutesStyle.FixedSections)
 {
     /// <summary>Longer transcripts are processed in parts (small models lose track of long input).</summary>
     public const int ChunkCharacters = 6000;
@@ -44,17 +50,46 @@ public sealed class MinutesGenerator(ILocalTextGenerator model)
     /// </summary>
     public async Task<MinutesDraft> GenerateAsync(string transcript, string sourceTitle, DateTime now,
         IProgress<MinutesProgress>? progress = null, CancellationToken cancellationToken = default,
-        IReadOnlyList<TermEntry>? dictionary = null)
+        IReadOnlyList<TermEntry>? dictionary = null, string noteId = "")
     {
+        var run = new MinutesRun
+        {
+            Input = MinutesInputSnapshot.Of(noteId, transcript),
+            Model = model.ModelName,
+            Style = style,
+            Settings = $"chunk={ChunkCharacters} correct={(dictionary is null ? "off" : "on")}",
+        };
+        var counted = new CountingGenerator(model, run);
+
         CorrectedTranscript? correction = null;
         string input = transcript;
         if (dictionary is not null)
         {
-            correction = await new TranscriptCorrector(model).CorrectAsync(transcript, dictionary, cancellationToken, progress).ConfigureAwait(false);
+            correction = await new TranscriptCorrector(counted).CorrectAsync(transcript, dictionary, cancellationToken, progress).ConfigureAwait(false);
             input = correction.Clean;
         }
 
+        // Topic style: the person's own notes are passed apart from the transcript (as context).
+        // Very long notes are not (they would be repeated with every part): the whole note is
+        // then summarized as one text. Nothing is cut either way.
+        string notes = string.Empty;
+        run.InputMode = "whole-note";
+        if (style == MinutesStyle.Topics && NoteSections.Split(input) is { Transcripts.Count: > 0 } note)
+        {
+            if (note.HumanNotes.Length <= TopicPrompt.MaxSeparateNotesCharacters)
+            {
+                notes = note.HumanNotes;
+                input = note.AllTranscripts;
+                run.InputMode = "notes-apart";
+            }
+            else
+            {
+                run.InputMode = "whole-note(long-notes)";
+            }
+        }
+
         var chunks = MinutesPrompt.Split(input, ChunkCharacters);
+        run.RecordParts(input.Replace("\r\n", "\n").Trim(), chunks);
         var parts = new List<string>();
         for (int i = 0; i < chunks.Count; i++)
         {
@@ -62,18 +97,36 @@ public sealed class MinutesGenerator(ILocalTextGenerator model)
             progress?.Report(new MinutesProgress("議事録を作成", part + 1, chunks.Count, 0, false));
             var generated = progress is null ? null : new SynchronousProgress<int>(n =>
                 progress.Report(new MinutesProgress("議事録を作成", part + 1, chunks.Count, Math.Max(0, n), n < 0)));
-            string answer = await model.CompleteAsync(MinutesPrompt.System, MinutesPrompt.User(chunks[i], i, chunks.Count),
-                MinutesPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
+            string answer = style == MinutesStyle.Topics
+                ? await counted.CompleteAsync(TopicPrompt.System, TopicPrompt.User(notes, chunks[i], i, chunks.Count),
+                    TopicPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false)
+                : await counted.CompleteAsync(MinutesPrompt.System, MinutesPrompt.User(chunks[i], i, chunks.Count),
+                    MinutesPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
             parts.Add(answer);
         }
 
         // Parts are merged mechanically (no second model pass that could invent connections).
-        var merged = MinutesValidator.Merge(parts);
         var warnings = new List<string>();
+        if (run.Unprocessed.Count > 0)
+        {
+            warnings.Add($"原文の一部（{run.Unprocessed.Count} か所）がAIに渡されていません。原文を確認してください。");
+        }
+
+        if (run.Truncated)
+        {
+            warnings.Add("AIの回答が長さの上限で途中で終わった部分があります。議事録に載っていない内容があるかもしれません。");
+        }
 
         // Quotes may come from the corrected text or the original; both count as "said".
         string source = correction is null ? transcript : transcript + "\n" + correction.Clean;
-        string body = MinutesValidator.Check(merged, source, warnings);
+        // Topic style: only what was said backs quotes, assignees and deadlines; the notes back
+        // only the items marked as taken from them.
+        string said = NoteSections.Split(transcript) is { Transcripts.Count: > 0 } original
+            ? original.AllTranscripts + "\n" + input
+            : source;
+        string body = style == MinutesStyle.Topics
+            ? TopicMinutes.Check(TopicMinutes.Merge(parts), said, notes + "\n" + said, warnings)
+            : MinutesValidator.Check(MinutesValidator.Merge(parts), source, warnings);
         if (correction is not null)
         {
             warnings.AddRange(correction.Decisions.Where(d => d.Status == CorrectionStatus.NeedsReview)
@@ -81,7 +134,27 @@ public sealed class MinutesGenerator(ILocalTextGenerator model)
             body += MinutesValidator.CorrectionAppendix(correction);
         }
 
-        return new MinutesDraft(MinutesValidator.Document(body, sourceTitle, model.ModelName, now, chunks.Count), warnings) { Correction = correction };
+        return new MinutesDraft(MinutesValidator.Document(body, sourceTitle, model.ModelName, now, chunks.Count), warnings) { Correction = correction, Run = run };
+    }
+}
+
+/// <summary>Passes calls to the model and records each one (sizes, finish reason, time) in the run.</summary>
+internal sealed class CountingGenerator(ILocalTextGenerator inner, MinutesRun run) : ILocalTextGenerator
+{
+    private readonly Dictionary<string, int> _parts = [];
+
+    public string ModelName => inner.ModelName;
+
+    public string LastFinish => inner.LastFinish;
+
+    public async Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
+    {
+        string step = system == TranscriptCorrector.System ? "correct" : "minutes";
+        int part = _parts[step] = _parts.GetValueOrDefault(step) + 1;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        string answer = await inner.CompleteAsync(system, user, maxTokens, cancellationToken, progress).ConfigureAwait(false);
+        run.Calls.Add(new MinutesCall(step, part, user.Length, answer.Length, inner.LastFinish, watch.Elapsed));
+        return answer;
     }
 }
 
@@ -181,10 +254,11 @@ public static partial class MinutesValidator
     [GeneratedRegex(@"<think>.*?</think>", RegexOptions.Singleline)]
     private static partial Regex ThinkBlock();
 
-    [GeneratedRegex(@"[（(]原文[:：]\s*「(?<q>[^」]*)」[）)]")]
+    // "（原文:「…」）"; small models sometimes drop "原文:" and write just "(「…」)".
+    [GeneratedRegex(@"[（(]\s*(?:原文\s*[:：]\s*)?「(?<q>[^」]*)」\s*[）)]")]
     private static partial Regex Quote();
 
-    [GeneratedRegex(@"(?<label>担当|期限)\s*[:：]\s*(?<value>[^/／（\n]+)")]
+    [GeneratedRegex(@"(?<label>担当|期限)\s*[:：]\s*(?<value>[^/／（(\n]+)")]
     private static partial Regex Field();
 
     [GeneratedRegex(@"^\s*#{1,6}\s*(?<title>.+?)\s*$")]
@@ -280,7 +354,7 @@ public static partial class MinutesValidator
         return sb.ToString().TrimEnd() + "\n";
     }
 
-    private static string CheckLine(string line, string section, string source, List<string> warnings)
+    internal static string CheckLine(string line, string section, string source, List<string> warnings)
     {
         string result = DoubleBullet().Replace(line, "$1- "); // "- - [ ]" -> "- [ ]"
 
@@ -344,9 +418,9 @@ public static partial class MinutesValidator
         return result;
     }
 
-    private static bool IsListItem(string line) => line.TrimStart().StartsWith('-') || line.TrimStart().StartsWith('*');
+    internal static bool IsListItem(string line) => line.TrimStart().StartsWith('-') || line.TrimStart().StartsWith('*');
 
-    private static bool IsNone(string line) => line.Trim().TrimStart('-', '*', ' ') is "なし" or "特になし" or "該当なし";
+    internal static bool IsNone(string line) => line.Trim().TrimStart('-', '*', ' ') is "なし" or "特になし" or "該当なし";
 
     /// <summary>Ignores spacing, punctuation and full/half-width differences when comparing with the transcript.</summary>
     public static string Normalize(string text)

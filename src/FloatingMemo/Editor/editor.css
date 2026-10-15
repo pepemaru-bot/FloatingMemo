@@ -92,9 +92,10 @@ html, body {
 .cm-placeholder { color: var(--muted); }
 
 /* --- Live preview ------------------------------------------------------------------ */
-.cm-h1 { font-size: 1.55em; font-weight: 600; }
-.cm-h2 { font-size: 1.32em; font-weight: 600; }
-.cm-h3 { font-size: 1.15em; font-weight: 600; }
+/* Larger text: tighter leading and slightly tighter tracking; body text stays at 0 / 1.6. */
+.cm-h1 { font-size: 1.55em; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+.cm-h2 { font-size: 1.32em; font-weight: 600; line-height: 1.35; letter-spacing: -0.005em; }
+.cm-h3 { font-size: 1.15em; font-weight: 600; line-height: 1.4; }
 .cm-h4, .cm-h5, .cm-h6 { font-weight: 600; }
 
 .cm-strong { font-weight: 700; }
@@ -135,13 +136,39 @@ html, body {
 
 .cm-list-number { color: var(--muted); }
 
+/* Drawn by us: the native box followed the page's colour scheme and showed an unchecked task
+   as a solid black square on the light paper. Empty: a quiet outline; done: filled accent with
+   a white tick. The press gives instant feedback (scales down while held). */
 .cm-task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
   width: 1em;
   height: 1em;
-  margin: 0 0.35em 0 0;
-  vertical-align: -0.12em;
+  margin: 0 0.4em 0 0;
+  vertical-align: -0.14em;
+  border: 1.5px solid var(--muted);
+  border-radius: 0.25em;
+  background: transparent;
   cursor: pointer;
-  accent-color: var(--accent);
+  transition: transform 100ms ease-out, background-color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.cm-task-checkbox:hover { border-color: var(--accent); }
+.cm-task-checkbox:active { transform: scale(0.88); }
+
+.cm-task-checkbox:checked {
+  border-color: var(--accent);
+  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 85% no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-task-checkbox { transition: none; }
+  .cm-task-checkbox:active { transform: none; }
+}
+
+@media (forced-colors: active) {
+  .cm-task-checkbox { appearance: auto; -webkit-appearance: auto; border: none; background: none; }
 }
 
 .cm-task-done { color: var(--done); text-decoration: line-through; }
@@ -154,8 +181,10 @@ html, body {
   margin: 0;
 }
 
-/* Thin, quiet scrollbar (the default one is heavy for a small floating window). */
+/* Thin, quiet scrollbar (the default one is heavy for a small floating window). It shows only
+   while the pointer is over the text, like a scroll indicator, instead of a permanent bar. */
 .cm-scroller::-webkit-scrollbar { width: 8px; height: 8px; }
 .cm-scroller::-webkit-scrollbar-track { background: transparent; }
-.cm-scroller::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 4px; }
+.cm-scroller::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.cm-scroller:hover::-webkit-scrollbar-thumb { background: var(--faint); }
 .cm-scroller::-webkit-scrollbar-thumb:hover { background: var(--muted); }

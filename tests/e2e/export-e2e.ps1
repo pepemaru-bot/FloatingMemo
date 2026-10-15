@@ -69,6 +69,9 @@ try {
   # --- AI minutes only --------------------------------------------------------------------------
   (Find 'MinutesButton').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep 1
   (Find 'MinutesCreate').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+  # The note has typed text only (no transcript block): confirm "メモだけで作成".
+  for ($i = 0; $i -lt 20 -and -not ($anyway = Find 'MinutesWithoutTranscript'); $i++) { Start-Sleep -Milliseconds 150 }
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
   for ($i = 0; $i -lt 80 -and -not ((InfoBarText 'AudioInfoBar') -match '下書きを作成しました'); $i++) { Start-Sleep -Milliseconds 250 }
   $msg = ExportVia 1 1 "$title（AI議事録）.docx"
   $minutesDocx = Join-Path $out "$title（AI議事録）.docx"

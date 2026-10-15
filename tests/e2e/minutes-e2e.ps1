@@ -1,4 +1,4 @@
-﻿param([string]$NotesDir, [string]$Project = (Join-Path $PSScriptRoot '..\..\src\FloatingMemo\FloatingMemo.csproj'))
+﻿param([string]$NotesDir, [string]$Speech, [string]$Project = (Join-Path $PSScriptRoot '..\..\src\FloatingMemo\FloatingMemo.csproj'))
 . (Join-Path $PSScriptRoot 'e2e-lib.ps1')
 # AI minutes with the test stand-in model (--fake-llm, instant, deliberately invents an
 # assignee). Checks: the transcript is never changed, minutes are a separate note, invented
@@ -17,6 +17,17 @@ function Choose([string]$id) {
   $m = MenuItem $id; if (-not $m) { throw "menu item not found: $id" }
   $m.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep -Milliseconds 400
 }
+function WaitIdle($sec = 120) {
+  $deadline = (Get-Date).AddSeconds($sec)
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 250 }
+  $false
+}
+# A note without a transcript asks first; "メモだけで作成" goes ahead.
+function CreateAnyway {
+  Choose 'MinutesCreate'; Start-Sleep -Milliseconds 500
+  $anyway = Find 'MinutesWithoutTranscript'
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep -Milliseconds 300 }
+}
 function WaitInfo([string]$pattern, $sec = 20) {
   for ($i = 0; $i -lt $sec * 4; $i++) { $t = InfoBarText 'AudioInfoBar'; if ($t -match $pattern) { return $t }; Start-Sleep -Milliseconds 250 }
   InfoBarText 'AudioInfoBar'
@@ -34,7 +45,13 @@ try {
   Check "no minutes yet -> switching is disabled" ($toggle -and -not $toggle.Current.IsEnabled)
   CloseMenu
 
-  Choose 'MinutesCreate'
+  # Only typed notes, no transcript: the user is asked instead of quietly using the notes alone.
+  Choose 'MinutesCreate'; Start-Sleep 1
+  $msg = InfoBarText 'AudioInfoBar'
+  Check "no transcript -> asked first, nothing created" ($msg -match '文字起こしがありません' -and (Find 'MinutesWithoutTranscript') -and (MinutesFiles).Count -eq 0) $msg
+  $anyway = Find 'MinutesWithoutTranscript'
+  if ($anyway) { $anyway.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
+  Start-Sleep -Milliseconds 300
   Check "progress shown, says the transcript is not changed" ((InfoBarText 'AudioInfoBar') -match 'AI議事録を作成中' -and (InfoBarText 'AudioInfoBar') -match '原文は変更されません') (InfoBarText 'AudioInfoBar')
   $done = WaitInfo '下書きを作成しました'
   Check "minutes created" ($done -match '下書きを作成しました') $done
@@ -42,7 +59,8 @@ try {
   $file = MinutesFiles | Select-Object -First 1
   $text = if ($file) { [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8) } else { '' }
   Check "minutes saved as Markdown with the AI-draft notice and a link to the source" ($text -match 'AI下書き' -and $text.Contains("[[$source]]")) (Esc $text.Substring(0, [Math]::Min(200, $text.Length)))
-  Check "all seven sections present" (@('会議の概要', '主な議題', '議論の要点', '決定事項', 'ToDo（担当者・期限）', '未決事項', '次回確認事項' | Where-Object { $text.Contains("## $_") }).Count -eq 7)
+  # The test model gets the topic layout (only Qwen3 1.7B keeps the seven fixed headings).
+  Check "topic layout: overview, a topic heading, marks; no fixed template" ($text.Contains('## 概要') -and $text.Contains('【決定】') -and $text.Contains('- [ ] 確認') -and -not $text.Contains('## 次回確認事項'))
   Check "invented assignee removed -> 未確認" (-not $text.Contains('架空太郎') -and $text.Contains('担当: 未確認（AIの推測を除去）'))
   Check "transcript note unchanged (byte for byte)" ([Convert]::ToBase64String([IO.File]::ReadAllBytes($sourceFile)) -eq [Convert]::ToBase64String($before))
 
@@ -57,7 +75,7 @@ try {
 
   # Cancel: nothing new is saved, the transcript stays.
   $count = (MinutesFiles).Count
-  Choose 'MinutesCreate'; Start-Sleep -Milliseconds 300
+  CreateAnyway
   Invoke-Button '中止'
   $msg = WaitInfo '中止しました' 10
   Check "cancel -> stopped, transcript kept" ($msg -match '中止しました' -and $msg -match '原文はそのまま') $msg
@@ -68,10 +86,36 @@ try {
   # No model installed: explained, nothing created.
   Launch -Extra @('--llm-model', (Join-Path $env:TEMP 'no-such-model.gguf'))
   Invoke-Button $source; Start-Sleep 1
-  Choose 'MinutesCreate'; Start-Sleep 1
+  CreateAnyway; Start-Sleep 1
   $msg = InfoBarText 'AudioInfoBar'
   Check "no model -> explained where to put it" ($msg -match 'AIモデルがありません' -and $msg -match 'Qwen3') $msg
   Check "no model -> nothing created" ((MinutesFiles).Count -eq $count)
+  CloseWindow; [void](WaitExit 20)
+
+  # Recording, then minutes: refused while recording (the transcript is not in the note yet),
+  # and after transcription the transcript is what the model gets (made-up speech).
+  Launch -Extra @('--fake-llm', '--fake-audio', $Speech)
+  SafeKeys 0x11, 0x4E; Start-Sleep 1   # Ctrl+N: a fresh note
+  SafeType "- 自分のメモ: 架空の定例"; Start-Sleep 1
+  $recorded = ActiveTab
+  Invoke-Button "録音開始"; Start-Sleep 1
+  Choose 'MinutesCreate'; Start-Sleep 1
+  $msg = InfoBarText 'AudioInfoBar'
+  $minutesBefore = (MinutesFiles).Count
+  Check "while recording -> refused (transcript not added yet)" ($msg -match '録音と文字起こしが終わってから') $msg
+  Invoke-Button "録音停止"
+  Check "transcription finished" (WaitIdle 120)
+  Start-Sleep 2
+  Choose 'MinutesCreate'
+  $done = WaitInfo '下書きを作成しました' 30
+  Check "after transcription -> minutes created without asking" ($done -match '下書きを作成しました' -and -not (Find 'MinutesWithoutTranscript')) $done
+  $file = MinutesFiles | Sort-Object LastWriteTime | Select-Object -Last 1
+  $text = if ($file) { [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8) } else { '' }
+  # The test model writes the first sentence of the transcript it was given.
+  Check "the model got the transcript, not only the typed notes" ((MinutesFiles).Count -eq $minutesBefore + 1 -and $text -match '資料を準備') (Esc $text.Substring(0, [Math]::Min(300, $text.Length)))
+  $log = Join-Path $env:TEMP 'FloatingMemo\minutes-diagnostics.log'
+  $last = if (Test-Path $log) { (Get-Content $log -Encoding UTF8 | Select-Object -Last 1) } else { '' }
+  Check "diagnostics: blocks=1, nothing unprocessed, no note text" ($last -match 'blocks=1' -and $last -match 'unprocessed=none' -and $last -notmatch '資料' -and $last -notmatch '自分のメモ') $last
   CloseWindow; [void](WaitExit 20)
 }
 catch { "ERROR: $_ (line $($_.InvocationInfo.ScriptLineNumber))" }
