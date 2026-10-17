@@ -56,6 +56,15 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     IsTextSelectionEnabled="True"
                     TextWrapping="Wrap" />
+                <ComboBox
+                    x:Name="PriorityBox"
+                    AutomationProperties.AutomationId="PriorityBox"
+                    Header="AI議事録の速度と確認の細かさ"
+                    SelectionChanged="OnPriorityChanged">
+                    <ComboBoxItem Content="自動（推奨: CPU では速度優先、GPU では品質優先）" />
+                    <ComboBoxItem Content="速度優先（決定・作業・数字など欠かせない発言だけを読み直す）" />
+                    <ComboBoxItem Content="品質優先（重要そうな発言を広く読み直す。CPU では時間がかかります）" />
+                </ComboBox>
                 <ToggleSwitch
                     x:Name="CorrectToggle"
                     AutomationProperties.AutomationId="CorrectToggle"
@@ -96,6 +105,18 @@
                 Text="本文は読みやすさを優先して不透明です（Markdown エディタの土台の WebView2 は背景を透過できないため、本文の下を透かすことはできません）。外周のガラスは、Windows の「透明効果」がオフのとき、省電力中、ハイコントラストでは透過しません。"
                 TextWrapping="Wrap" />
             <Button Click="OnAppearanceReset" Content="既定に戻す（透明感 60・乳白感 60）" />
+            <ToggleSwitch
+                x:Name="VisualToggle"
+                AutomationProperties.AutomationId="VisualToggle"
+                Header="編集の方式（再起動後に反映）"
+                OffContent="Markdown ソースで編集（標準）"
+                OnContent="ビジュアル編集（試験的）"
+                Toggled="OnVisualToggled" />
+            <TextBlock
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="ビジュアル編集では、表やチェックリストを見たまま編集できます。見たまま編集で形が変わる書き方を含むノートは、Markdown のテキストのまま表示します。開いただけではノートを書き換えません。"
+                TextWrapping="Wrap" />
         </StackPanel>
 
         <!-- ===== Dictionary ===== -->

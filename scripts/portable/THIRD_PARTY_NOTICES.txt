@@ -34,6 +34,15 @@ CodeMirror 6 and Lezer (Markdown editor, Editor\vendor\; versions in Editor\vend
 style-mod, w3c-keyname, crelt, @marijn/find-cluster-break (CodeMirror dependencies)
   License: MIT License, Copyright (C) Marijn Haverbeke and others
 
+Milkdown 7, ProseMirror, unified / remark / micromark / mdast and their dependencies
+(experimental visual editor, Editor\visual-vendor\; every package with version and license in
+Editor\visual-vendor\versions.json — all 104 packages are MIT licensed)
+  https://milkdown.dev/ , https://prosemirror.net/ , https://unifiedjs.com/
+  License: MIT License
+  Copyright (c) Mirone (Milkdown), Copyright (C) Marijn Haverbeke and others (ProseMirror),
+  Copyright (c) Titus Wormer (unified, remark, micromark, mdast utilities) and the other
+  authors named in each package; where a package ships a LICENSE file it is included next to it.
+
 Markdig 1.4.0 (Markdown parsing for PDF / Word export)
   https://github.com/xoofx/markdig
   License: BSD 2-Clause License (full text at the end of this file)

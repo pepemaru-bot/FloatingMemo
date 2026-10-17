@@ -23,16 +23,21 @@ internal sealed class WebMarkdownEditor : IMemoEditor
 {
     private const string HostName = "editor.floatingmemo.invalid"; // .invalid never resolves on a network
     private const int MaxTextLength = 20_000_000;
-    private static readonly Uri EditorUri = new($"https://{HostName}/editor.html");
+    private readonly Uri _editorUri;
+
+    /// <summary>The page in use: editor.html (Markdown source, CodeMirror) or visual.html (experimental, Milkdown).</summary>
+    public bool Visual { get; }
 
     private readonly WebView2 _webView;
     private readonly HashSet<string> _knownNotes = new(StringComparer.Ordinal);
     private TaskCompletionSource? _flush;
     private string? _noteId;
 
-    private WebMarkdownEditor(WebView2 webView)
+    private WebMarkdownEditor(WebView2 webView, bool visual)
     {
         _webView = webView;
+        Visual = visual;
+        _editorUri = new Uri($"https://{HostName}/{(visual ? "visual.html" : "editor.html")}");
     }
 
     public event EventHandler<EditorTextChange>? TextChanged;
@@ -76,10 +81,11 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     internal static string UserDataFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FloatingMemo", "WebView2");
 
-    public static async Task<WebMarkdownEditor?> CreateAsync(WebView2 webView, string userDataFolder, string? theme, string? paper = null)
+    public static async Task<WebMarkdownEditor?> CreateAsync(WebView2 webView, string userDataFolder, string? theme, string? paper = null, bool visual = false)
     {
         string editorFolder = Path.Combine(AppContext.BaseDirectory, "Editor");
-        if (!File.Exists(Path.Combine(editorFolder, "editor.html")))
+        visual = visual && File.Exists(Path.Combine(editorFolder, "visual.html"));
+        if (!File.Exists(Path.Combine(editorFolder, visual ? "visual.html" : "editor.html")))
         {
             return null;
         }
@@ -101,12 +107,12 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             var environment = await CreateEnvironmentAsync(userDataFolder);
             await webView.EnsureCoreWebView2Async(environment);
 
-            var editor = new WebMarkdownEditor(webView);
+            var editor = new WebMarkdownEditor(webView, visual);
             var ready = new TaskCompletionSource();
             editor._theme = theme;
             editor._paper = paper;
             editor.Configure(webView.CoreWebView2, editorFolder, ready);
-            webView.CoreWebView2.Navigate(EditorUri.ToString());
+            webView.CoreWebView2.Navigate(editor._editorUri.ToString());
 
             var finished = await Task.WhenAny(ready.Task, Task.Delay(TimeSpan.FromSeconds(15)));
             return finished == ready.Task ? editor : null;
@@ -140,7 +146,7 @@ internal sealed class WebMarkdownEditor : IMemoEditor
 
         core.NavigationStarting += (_, e) =>
         {
-            if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) || uri != EditorUri)
+            if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) || uri != _editorUri)
             {
                 e.Cancel = true; // links, dropped files, script redirects: never navigate away
             }
@@ -163,7 +169,7 @@ internal sealed class WebMarkdownEditor : IMemoEditor
                 return;
             }
 
-            if (message is null || e.Source != EditorUri.ToString())
+            if (message is null || e.Source != _editorUri.ToString())
             {
                 return;
             }

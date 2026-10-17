@@ -19,6 +19,23 @@ public interface ILocalTextGenerator
 
     /// <summary>Why the last answer ended (see <see cref="MinutesFinish"/>); for diagnostics.</summary>
     string LastFinish => MinutesFinish.Unknown;
+
+    /// <summary>Tokens of a text with the model's own tokenizer (null = not available; an estimate is used).</summary>
+    int? CountTokens(string text) => null;
+
+    /// <summary>Whether the loaded model runs on the GPU (null = unknown or not loaded yet).</summary>
+    bool? UsesGpu => null;
+}
+
+/// <summary>
+/// How much extra work the fact-first minutes may do to recover statements the first pass missed.
+/// Auto = quality on a GPU, speed on a CPU (where every extra request costs tens of seconds).
+/// </summary>
+public enum MinutesPriority
+{
+    Auto,
+    Speed,
+    Quality,
 }
 
 /// <summary>Where the minutes pipeline is (shown as text: step, part, characters; never a guessed %).</summary>
@@ -44,7 +61,12 @@ public sealed record MinutesDraft(string Markdown, IReadOnlyList<string> Warning
 /// <param name="template">A user template: its headings and rules replace the layout's own (notes passed apart, like Topics).</param>
 public sealed partial class MinutesGenerator(ILocalTextGenerator model, MinutesStyle style = MinutesStyle.FixedSections, MinutesTemplate? template = null)
 {
-    private readonly MinutesStyle _style = template is null ? style : MinutesStyle.Topics;
+    /// <summary>Speed or quality of the recovery step (fact-first layouts only).</summary>
+    public MinutesPriority Priority { get; init; } = MinutesPriority.Auto;
+
+    // With a template: the fact ledger when the model's layout is fact-first; otherwise (1.7B) the
+    // template is filled like the topic layout, as before.
+    private readonly MinutesStyle _style = template is null || style is MinutesStyle.Facts or MinutesStyle.FactsProse ? style : MinutesStyle.Topics;
 
     /// <summary>Longer transcripts are processed in parts (small models lose track of long input).</summary>
     public const int ChunkCharacters = 6000;
@@ -75,9 +97,10 @@ public sealed partial class MinutesGenerator(ILocalTextGenerator model, MinutesS
             input = correction.Clean;
         }
 
-        if (_style == MinutesStyle.Facts)
+        if (_style is MinutesStyle.Facts or MinutesStyle.FactsProse)
         {
-            return await GenerateFromFactsAsync(transcript, input, correction, sourceTitle, now, run, counted, progress, cancellationToken).ConfigureAwait(false);
+            return await GenerateFromFactsAsync(transcript, input, correction, sourceTitle, now, run, counted, progress, cancellationToken,
+                write: _style == MinutesStyle.FactsProse && template is null, template: template, priority: Priority).ConfigureAwait(false);
         }
 
         // Topic style: the person's own notes are passed apart from the transcript (as context).
@@ -158,12 +181,15 @@ public sealed partial class MinutesGenerator(ILocalTextGenerator model, MinutesS
 public sealed partial class MinutesGenerator
 {
     private static async Task<MinutesDraft> GenerateFromFactsAsync(string original, string input, CorrectedTranscript? correction,
-        string sourceTitle, DateTime now, MinutesRun run, ILocalTextGenerator model, IProgress<MinutesProgress>? progress, CancellationToken cancellationToken)
+        string sourceTitle, DateTime now, MinutesRun run, ILocalTextGenerator model, IProgress<MinutesProgress>? progress, CancellationToken cancellationToken,
+        bool write = false, MinutesTemplate? template = null, MinutesPriority priority = MinutesPriority.Auto)
     {
         // A note without a transcript block is all notes: its facts are marked as taken from them.
         var units = SourceUnits.From(NoteSections.Split(input));
         var byId = units.ToDictionary(u => u.Id);
-        var parts = FactMinutes.Group(units);
+        // Parts are measured with the model's tokenizer when it has one (an estimate otherwise).
+        Func<string, int> tokens = text => model.CountTokens(text) ?? FactMinutes.EstimateTokens(text);
+        var parts = FactMinutes.Group(units, tokens);
         run.InputMode = "facts";
         for (int i = 0; i < parts.Count; i++)
         {
@@ -177,6 +203,7 @@ public sealed partial class MinutesGenerator
 
         var facts = new List<Fact>();
         int malformed = 0;
+        var firstPass = System.Diagnostics.Stopwatch.StartNew();
         for (int i = 0; i < parts.Count; i++)
         {
             int part = i;
@@ -186,10 +213,48 @@ public sealed partial class MinutesGenerator
             string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.User(FactMinutes.ContextBefore(parts, i), parts[i], i, parts.Count),
                 FactPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
             var allowed = parts[i].Select(u => u.Id).ToHashSet();
-            facts.AddRange(FactMinutes.Parse(answer, out int bad).Select(f => FactMinutes.Check(f, byId, allowed)));
+            facts.AddRange(FactMinutes.Parse(answer, out int bad).Where(f => Keep(f, allowed)).Select(f => FactMinutes.Check(f, byId, allowed)));
             malformed += bad;
         }
 
+        // Facts only from the parts' context lines, or only from "次に予算です"-like remarks, are dropped.
+        bool Keep(Fact f, ISet<string> allowed) => !FactMinutes.OnlyContext(f, allowed, byId) && !FactMinutes.OnlyProcedural(f, byId);
+
+        // Recovery: statements no fact uses are extracted again, several ranges per request.
+        // Speed (CPU by default): only what minutes must not lose (tasks with owner and deadline,
+        // decisions, amounts and dates, "not decided"), one request, at most a quarter of the
+        // first pass's time. Quality: every important cue, up to 8 ranges, half the time (at
+        // least a minute). What still has no fact is reported below.
+        bool speed = priority == MinutesPriority.Speed || (priority == MinutesPriority.Auto && model.UsesGpu != true);
+        var recovery = FactMinutes.RecoveryRanges(units, facts, criticalOnly: speed);
+        var recoveryBatches = FactMinutes.RecoveryBatches(units, recovery.Take(FactMinutes.MaxRecoveryRanges).ToList(), tokens);
+        if (speed && recoveryBatches.Count > 1)
+        {
+            recoveryBatches = recoveryBatches.Take(1).ToList();
+        }
+
+        var limit = speed
+            ? TimeSpan.FromSeconds(firstPass.Elapsed.TotalSeconds * FactMinutes.SpeedRecoveryTimeShare)
+            : TimeSpan.FromSeconds(Math.Max(60, firstPass.Elapsed.TotalSeconds * FactMinutes.RecoveryTimeShare));
+        var recoveryClock = System.Diagnostics.Stopwatch.StartNew();
+        int recovered = 0, sent = 0;
+        for (int b = 0; b < recoveryBatches.Count && (b == 0 || recoveryClock.Elapsed < limit); b++)
+        {
+            progress?.Report(new MinutesProgress("議事録を作成", b + 1, recoveryBatches.Count, 0, false));
+            string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.Recovery(recoveryBatches[b]),
+                FactPrompt.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
+            var allowed = recoveryBatches[b].SelectMany(r => r.Range).Select(u => u.Id).ToHashSet();
+            var found = FactMinutes.Parse(answer, out int bad).Where(f => Keep(f, allowed)).Select(f => FactMinutes.Check(f, byId, allowed)).ToList();
+            recovered += found.Count;
+            sent += recoveryBatches[b].Count;
+            facts.AddRange(found);
+            malformed += bad;
+        }
+
+        // A task that says who and when but not what gets its object from the statement before it
+        // (cited too), or is marked 要確認.
+        facts = facts.Select(f => FactMinutes.Clarify(f, units)).ToList();
+        run.InputMode = $"facts {(speed ? "speed" : "quality")} recover={sent}/{recovery.Count} requests={recoveryBatches.Count} found={recovered}";
         var warnings = new List<string>();
         if (malformed > 0)
         {
@@ -201,14 +266,54 @@ public sealed partial class MinutesGenerator
             warnings.Add("AIの回答が長さの上限で途中で終わった部分があります。議事録に載っていない内容があるかもしれません。");
         }
 
+        facts = facts.Select((f, i) => f with { Id = $"F{i + 1:000}" }).ToList(); // the ledger's ids, in the order found
         var topics = FactMinutes.Merge(facts);
         var uncited = FactMinutes.Uncited(units, facts);
-        if (uncited.Count > 0)
+        var importantLeft = FactMinutes.Uncited(units.Where(u => FactMinutes.IsImportant(u.Text)).ToList(), facts);
+        if (importantLeft.Count > 0)
+        {
+            warnings.Add($"決定・作業・日付・数字などを含むのに議事録に入っていない発言があります（{string.Join("、", importantLeft)}）。原文を確認してください。");
+        }
+        else if (uncited.Count > 0)
         {
             warnings.Add($"議事録のどの項目にも使われていない発言があります（{string.Join("、", uncited)}）。");
         }
 
-        string body = FactMinutes.Render(topics, byId, [], warnings) + FactMinutes.SourceAppendix(units, uncited);
+        // Optional writing step: prose from the checked facts only, checked again sentence by sentence.
+        Dictionary<string, string>? paragraphs = null;
+        HashSet<string>? covered = null;
+        if (write)
+        {
+            paragraphs = [];
+            covered = [];
+            int kept = 0, removed = 0;
+            var batches = FactWriting.Batches(topics);
+            for (int b = 0; b < batches.Count; b++)
+            {
+                progress?.Report(new MinutesProgress("議事録を作成", b + 1, batches.Count, 0, false));
+                string prose = await model.CompleteAsync(FactWriting.System, FactWriting.User(batches[b]), FactWriting.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
+                var result = FactWriting.Check(prose, batches[b]);
+                foreach (var (topic, paragraph) in result.Paragraphs)
+                {
+                    paragraphs[topic] = paragraph;
+                }
+
+                covered.UnionWith(result.CoveredIds);
+                kept += result.Kept;
+                removed += result.Removed;
+            }
+
+            run.InputMode += $" write kept={kept} removed={removed}";
+            if (removed > 0)
+            {
+                warnings.Add($"文章化で、確認済みの事実にない内容を含む文を {removed} 件除きました（その事実は箇条書きで残しています）。");
+            }
+        }
+
+        string body = template is null
+            ? FactMinutes.Render(topics, byId, [], warnings, paragraphs, covered)
+            : await RenderTemplateAsync(template, topics, byId, model, warnings, run, progress, cancellationToken).ConfigureAwait(false);
+        body += FactMinutes.SourceAppendix(units, uncited);
         if (correction is not null)
         {
             body += MinutesValidator.CorrectionAppendix(correction);
@@ -223,6 +328,73 @@ public sealed partial class MinutesGenerator
     }
 }
 
+public sealed partial class MinutesGenerator
+{
+    /// <summary>A user template filled from the fact ledger (see <see cref="TemplateFacts"/>).</summary>
+    private static async Task<string> RenderTemplateAsync(MinutesTemplate template, List<(string Topic, List<Fact> Facts)> topics,
+        IReadOnlyDictionary<string, SourceUnit> units, ILocalTextGenerator model, List<string> warnings, MinutesRun run,
+        IProgress<MinutesProgress>? progress, CancellationToken cancellationToken)
+    {
+        var facts = topics.SelectMany(t => t.Facts).ToList();
+        var numbered = template.Sections.Select((s, i) => (Number: i + 1, Section: s)).ToList();
+        var byModel = numbered.Where(x => TemplateFacts.SlotOf(x.Section) == TemplateFacts.Slot.Model && x.Section.Kind != TemplateRules.Draft).ToList();
+        var ruled = numbered.Select(x => TemplateFacts.SlotOf(x.Section)).ToHashSet();
+        bool HasRule(Fact f) => (f.Kind == FactKind.Decision && ruled.Contains(TemplateFacts.Slot.Decisions))
+            || (f.Kind == FactKind.Task && ruled.Contains(TemplateFacts.Slot.Tasks))
+            || (f.Kind is FactKind.Open or FactKind.Question && ruled.Contains(TemplateFacts.Slot.Open));
+
+        // The model only chooses a heading number for facts no heading claims by kind.
+        var assignments = new Dictionary<string, int>();
+        var open = facts.Where(f => !HasRule(f)).ToList();
+        if (byModel.Count > 0 && open.Count > 0)
+        {
+            var ids = facts.Select(f => f.Id).ToHashSet();
+            var numbers = byModel.Select(x => x.Number).ToHashSet();
+            foreach (var batch in open.Chunk(40))
+            {
+                progress?.Report(new MinutesProgress("議事録を作成", 1, 1, 0, false));
+                string answer = await model.CompleteAsync(TemplateFacts.AssignSystem, TemplateFacts.AssignUser(byModel, batch),
+                    TemplateFacts.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
+                foreach (var (id, n) in TemplateFacts.ParseAssignments(answer, ids, numbers))
+                {
+                    assignments[id] = n;
+                }
+            }
+        }
+
+        // Draft headings: written from the facts, every sentence checked against them.
+        var drafts = new Dictionary<string, string>();
+        foreach (var (_, section) in numbered.Where(x => x.Section.Kind == TemplateRules.Draft))
+        {
+            progress?.Report(new MinutesProgress("議事録を作成", 1, 1, 0, false));
+            string answer = await model.CompleteAsync(TemplateFacts.DraftSystem(section), FactWriting.User(topics),
+                FactWriting.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
+            // A line repeating the heading ("共有メモ（下書き）") is not part of the text.
+            answer = string.Join("\n", answer.Replace("\r\n", "\n").Split('\n')
+                .Where(l => !MinutesValidator.Normalize(l).Equals(MinutesValidator.Normalize(section.Title + "（下書き）"), StringComparison.Ordinal)
+                    && !MinutesValidator.Normalize(l).Equals(MinutesValidator.Normalize(section.Title), StringComparison.Ordinal)));
+            if (!answer.Contains("## ", StringComparison.Ordinal))
+            {
+                answer = $"## {section.Title}\n{answer}";
+            }
+
+            var result = FactWriting.Check(answer, [(section.Title, facts)]);
+            if (result.Paragraphs.TryGetValue(section.Title, out string? text))
+            {
+                drafts[section.Title] = text;
+            }
+
+            if (result.Removed > 0)
+            {
+                warnings.Add($"「{section.Title}」の下書きから、確認済みの事実にない内容を含む文を {result.Removed} 件除きました。");
+            }
+        }
+
+        run.InputMode += $" template={template.Id} assigned={assignments.Count(a => a.Value > 0)}/{open.Count}";
+        return TemplateFacts.Render(template, facts, units, assignments, drafts, topics.Select(t => t.Topic).ToList(), warnings);
+    }
+}
+
 /// <summary>Passes calls to the model and records each one (sizes, finish reason, time) in the run.</summary>
 internal sealed class CountingGenerator(ILocalTextGenerator inner, MinutesRun run) : ILocalTextGenerator
 {
@@ -231,6 +403,10 @@ internal sealed class CountingGenerator(ILocalTextGenerator inner, MinutesRun ru
     public string ModelName => inner.ModelName;
 
     public string LastFinish => inner.LastFinish;
+
+    public int? CountTokens(string text) => inner.CountTokens(text);
+
+    public bool? UsesGpu => inner.UsesGpu;
 
     public async Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
     {

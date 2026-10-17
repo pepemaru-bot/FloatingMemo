@@ -70,6 +70,7 @@ $suites = [ordered]@{
     'progress'      = @('-LongSpeech', $long)
     'export'        = @()
     'templates'     = @()
+    'visual'        = @()
     'integration'   = @('-LongSpeech', $long)
 }
 

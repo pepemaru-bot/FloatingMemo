@@ -222,10 +222,10 @@ public static partial class MinutesQuality
         return result;
     }
 
-    [GeneratedRegex(@"〔(?<ids>[AB]\d{3}(・[AB]\d{3})*)〕")]
+    [GeneratedRegex(@"〔(?<ids>[AB]\d{3,}(・[AB]\d{3,})*)〕")]
     private static partial Regex SourceRefs();
 
-    [GeneratedRegex(@"^- (?<id>[AB]\d{3}) (?<text>.*)$", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^- (?<id>[AB]\d{3,}) (?<text>.*)$", RegexOptions.Multiline)]
     private static partial Regex NumberedLine();
 
     /// <summary>The numbered source after fact-first minutes (id → text); empty for other layouts.</summary>

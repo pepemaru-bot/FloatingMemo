@@ -22,6 +22,12 @@ public enum MinutesStyle
     /// written from the checked facts only (see <see cref="FactMinutes"/>).
     /// </summary>
     Facts,
+
+    /// <summary>
+    /// <see cref="Facts"/> plus a writing step: the model writes each topic as a short paragraph
+    /// from the checked facts only, and every sentence is checked against the facts again.
+    /// </summary>
+    FactsProse,
 }
 
 /// <summary>Which layout each model gets (from the same-conditions comparison, docs/evaluation).</summary>

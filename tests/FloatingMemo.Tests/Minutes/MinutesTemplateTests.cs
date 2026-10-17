@@ -16,7 +16,23 @@ public sealed class MinutesTemplateTests : IDisposable
         }
     }
 
-    private static string Samples => Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "docs", "templates");
+    // The repository's docs/templates, found upward from the test output folder (its depth depends on the build).
+    private static string Samples
+    {
+        get
+        {
+            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            {
+                string candidate = Path.Combine(dir.FullName, "docs", "templates");
+                if (Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            throw new DirectoryNotFoundException("docs/templates");
+        }
+    }
 
     private string Write(string name, string text)
     {

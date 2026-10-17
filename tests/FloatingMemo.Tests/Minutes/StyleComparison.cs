@@ -17,7 +17,7 @@ public sealed class StyleComparison(ITestOutputHelper output)
 
     private static readonly Meeting[] Meetings =
     [
-        new("短い学習相談（校正あり）", EvaluationMeeting.Note, "学習相談（架空）", true),
+        new("短い打ち合わせ（校正あり）", EvaluationMeeting.Note, "清掃イベントの打ち合わせ（架空）", true),
         new("長いアプリ開発定例（2 分割）", LongMeeting.Note, "アプリ開発定例（架空）", false),
     ];
 

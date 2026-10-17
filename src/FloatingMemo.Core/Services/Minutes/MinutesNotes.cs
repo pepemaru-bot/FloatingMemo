@@ -45,6 +45,11 @@ public sealed class FakeMinutesModel : ILocalTextGenerator
 
     public async Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
     {
+        if (user.Contains("議事録にまだ入っていない", StringComparison.Ordinal))
+        {
+            return string.Empty; // the recovery pass: nothing more to find (and no waiting in UI tests)
+        }
+
         progress?.Report(-1);
         await Task.Delay(500, cancellationToken).ConfigureAwait(false);
         for (int i = 1; i <= 4; i++)
@@ -77,6 +82,27 @@ public sealed class FakeMinutesModel : ILocalTextGenerator
             }
 
             return lines.Count == 0 ? "なし" : string.Join("\n", lines);
+        }
+
+        if (system == TemplateFacts.AssignSystem)
+        {
+            // Heading assignment: every fact to the first heading offered.
+            string heading = user.Split('\n').FirstOrDefault(l => l.Length > 2 && char.IsDigit(l[0]))?.Split('.')[0] ?? "0";
+            return string.Join("\n", user.Split('\n').Where(l => l.StartsWith('F')).Select(l => $"{l.Split(' ')[0]}: {heading}"));
+        }
+
+        if (system.StartsWith("あなたは議事録の清書係です。「確認済みの事実」だけを使って、次の文章の下書き", StringComparison.Ordinal))
+        {
+            // Draft heading: one sentence made of the first fact, citing it.
+            var fact = user.Split('\n').FirstOrDefault(l => l.StartsWith('F'));
+            if (fact is null)
+            {
+                return string.Empty;
+            }
+
+            string id = fact.Split(' ')[0];
+            string text = fact[(fact.IndexOf(']') + 1)..].Split('（')[0].Trim();
+            return $"{text}。[{id}]";
         }
 
         if (system == FactPrompt.System)

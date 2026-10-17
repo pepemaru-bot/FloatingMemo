@@ -34,7 +34,7 @@ public sealed class ModelComparison(ITestOutputHelper output)
 
             using var model = new LlamaTextGenerator(path);
             var watch = Stopwatch.StartNew();
-            var draft = await new MinutesGenerator(model).GenerateAsync(EvaluationMeeting.Note, "学習相談（架空）", new DateTime(2026, 10, 13, 9, 0, 0),
+            var draft = await new MinutesGenerator(model).GenerateAsync(EvaluationMeeting.Note, "清掃イベントの打ち合わせ（架空）", new DateTime(2026, 10, 13, 9, 0, 0),
                 dictionary: EvaluationMeeting.Dictionary);
             watch.Stop();
 

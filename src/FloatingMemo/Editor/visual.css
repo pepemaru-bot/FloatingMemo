@@ -1,0 +1,30 @@
+/* Visual (WYSIWYG) editing with Milkdown. Colours and paper come from editor.css. */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; }
+#visual { flex: 1; overflow: auto; padding: 4px 10px 24px 10px; color: var(--text);
+  font-family: "Segoe UI Variable Text", "Yu Gothic UI", "Meiryo UI", sans-serif; font-size: 15px; line-height: 1.6; }
+#source { flex: 1; border: 0; outline: none; resize: none; padding: 4px 10px; background: transparent; color: var(--text);
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px; caret-color: var(--caret); }
+#notice { font-size: 12px; color: var(--muted); padding: 4px 10px; border-bottom: 1px solid var(--faint); }
+.ProseMirror { outline: none; caret-color: var(--caret); white-space: pre-wrap; }
+.ProseMirror p { margin: 0 0 .4em; }
+.ProseMirror h1 { font-size: 1.55em; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; margin: .3em 0; }
+.ProseMirror h2 { font-size: 1.32em; font-weight: 600; line-height: 1.35; margin: .3em 0; }
+.ProseMirror h3 { font-size: 1.15em; font-weight: 600; line-height: 1.4; margin: .3em 0; }
+.ProseMirror ul, .ProseMirror ol { margin: 0 0 .4em; padding-left: 1.4em; }
+.ProseMirror blockquote { border-left: 3px solid var(--faint); margin: 0; padding-left: 10px; color: var(--muted); }
+.ProseMirror code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .92em; background: var(--code-bg); border-radius: 4px; padding: 0 3px; }
+.ProseMirror pre { background: var(--code-bg); padding: 6px 8px; border-radius: 6px; overflow-x: auto; }
+.ProseMirror a { color: var(--accent); }
+.ProseMirror table { border-collapse: collapse; margin: 6px 0; min-width: 40%; }
+.ProseMirror td, .ProseMirror th { border: 1px solid var(--faint); padding: 3px 8px; vertical-align: top; position: relative; min-width: 3em; }
+.ProseMirror th { font-weight: 600; background: var(--code-bg); }
+.ProseMirror .selectedCell::after { content: ""; position: absolute; inset: 0; background: var(--selection); pointer-events: none; }
+.tableWrapper { overflow-x: auto; }
+/* Task items: a box drawn before the item; clicking it toggles the item (handled in visual.js). */
+.ProseMirror li[data-item-type="task"] { list-style: none; position: relative; }
+.ProseMirror li[data-item-type="task"]::before { content: ""; position: absolute; left: -1.35em; top: .3em; width: .95em; height: .95em;
+  box-sizing: border-box; border: 1.5px solid var(--muted); border-radius: .25em; cursor: pointer; }
+.ProseMirror li[data-item-type="task"][data-checked="true"]::before { background: var(--accent); border-color: var(--accent); }
+.ProseMirror li[data-item-type="task"][data-checked="true"] > * { color: var(--done); text-decoration: line-through; }
+.ProseMirror ::selection { background: var(--selection); }

@@ -43,7 +43,9 @@ public sealed partial class SettingsWindow : Window
         _loading = true;
         LoadModels();
         CorrectToggle.IsOn = services.Preferences.CorrectTranscriptBeforeMinutes;
+        VisualToggle.IsOn = services.Preferences.VisualEditor;
         AccelerationBox.SelectedIndex = (int)services.Preferences.Acceleration;
+        PriorityBox.SelectedIndex = (int)services.Preferences.MinutesPriority;
         ShowAccelerationReport();
         ClaritySlider.Value = Math.Round(services.Preferences.GlassClarity * 100);
         PaperSlider.Value = Math.Round(services.Preferences.PaperMilkiness * 100);
@@ -297,6 +299,17 @@ public sealed partial class SettingsWindow : Window
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{LlamaTextGenerator.ModelsDirectory}\"") { UseShellExecute = true });
     }
 
+    private void OnPriorityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || PriorityBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _services.Preferences.MinutesPriority = (FloatingMemo.Services.Minutes.MinutesPriority)PriorityBox.SelectedIndex;
+        _services.Settings.TrySave(_services.Preferences);
+    }
+
     private void OnAccelerationChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_loading || AccelerationBox.SelectedIndex < 0)
@@ -317,6 +330,17 @@ public sealed partial class SettingsWindow : Window
             : string.Empty;
         AccelerationReport.Text = AccelerationState.Report() + pending
             + "\nGPU は Vulkan で使います（NVIDIA・AMD・Intel）。使えないときは自動で CPU になります。";
+    }
+
+    private void OnVisualToggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        _services.Preferences.VisualEditor = VisualToggle.IsOn;
+        _services.Settings.TrySave(_services.Preferences);
     }
 
     private void OnCorrectToggled(object sender, RoutedEventArgs e)

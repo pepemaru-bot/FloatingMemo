@@ -22,6 +22,9 @@ public sealed class AppSettings
     /// <summary>File name of the Qwen model for AI minutes (null = the best one available).</summary>
     public string? MinutesModel { get; set; }
 
+    /// <summary>Experimental visual (WYSIWYG) editing instead of the Markdown source editor (applies after a restart).</summary>
+    public bool VisualEditor { get; set; }
+
     /// <summary>Id of the user's minutes template (null = おまかせ: the layout chosen for the model).</summary>
     public string? MinutesTemplateId { get; set; }
 
@@ -36,6 +39,9 @@ public sealed class AppSettings
 
     /// <summary>GPU use for Whisper and Qwen (applies after a restart).</summary>
     public FloatingMemo.Services.Acceleration.AccelerationMode Acceleration { get; set; } = FloatingMemo.Services.Acceleration.AccelerationMode.Auto;
+
+    /// <summary>AI minutes: Auto (speed on a CPU, quality on a GPU), Speed or Quality.</summary>
+    public FloatingMemo.Services.Minutes.MinutesPriority MinutesPriority { get; set; } = FloatingMemo.Services.Minutes.MinutesPriority.Auto;
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]

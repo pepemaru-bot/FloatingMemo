@@ -77,7 +77,8 @@ foreach ($entry in $licenseFiles.GetEnumerator()) {
 }
 
 # Guards: nothing personal and no AI model may end up in the package.
-$personal = Get-ChildItem $app -Recurse -File -Include '*.md', '*.wav', '*.log', 'settings.json', 'session.json', 'notes.json', 'dictionary.json', '*.pfx', '*.tmp'
+$personal = Get-ChildItem $app -Recurse -File -Include '*.md', '*.wav', '*.log', 'settings.json', 'session.json', 'notes.json', 'dictionary.json', '*.pfx', '*.tmp' |
+    Where-Object { $_.FullName -notmatch '\\Editor\\visual-vendor\\[^\\]+\\license\.md$' }  # a vendored package's own license text
 if (Test-Path (Join-Path $app 'FloatingMemo.exe.WebView2')) { throw 'WebView2 user data found in the package' }
 if ($personal) { throw "Unexpected personal/data files in package: $($personal.FullName -join ', ')" }
 $models = Get-ChildItem $app -Recurse -File -Include '*.gguf', '*.ggml', 'ggml-*.bin', '*.onnx', '*.safetensors'

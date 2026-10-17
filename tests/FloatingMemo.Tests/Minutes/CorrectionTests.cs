@@ -23,27 +23,27 @@ public sealed class TermDictionaryTests : IDisposable
         var dictionary = new TermDictionary(FilePath);
         var first = dictionary.Import("""
             {
-              "学校名": [
-                { "name": "架空学園高校", "reading": "かくうがくえんこうこう", "略称": "架空学園", "誤認識": ["加工学園高校"] },
+              "施設名": [
+                { "name": "架空ホール", "reading": "かくうほーる", "略称": "架空", "誤認識": ["加工ホール"] },
                 "未来中学校"
               ],
-              "教育・受験用語": [ { "用語": "共通テスト", "読み": "きょうつうてすと", "aliases": ["共テ"], "misrecognitions": "今日通テスト、共通テキスト" } ]
+              "業務用語": [ { "用語": "稟議書", "読み": "りんぎしょ", "aliases": ["稟議"], "misrecognitions": "林業書、輪議書" } ]
             }
             """, "初期辞書.json");
 
         Assert.Equal(3, first.Added);
-        var school = dictionary.Entries.Single(e => e.Term == "架空学園高校");
-        Assert.Equal("学校名", school.Category);
-        Assert.Equal(["架空学園"], school.Aliases);
-        Assert.Equal(["加工学園高校"], school.Misrecognitions);
-        Assert.Equal("import:初期辞書.json", school.Source);
-        Assert.Equal(["今日通テスト", "共通テキスト"], dictionary.Entries.Single(e => e.Term == "共通テスト").Misrecognitions);
+        var hall = dictionary.Entries.Single(e => e.Term == "架空ホール");
+        Assert.Equal("施設名", hall.Category);
+        Assert.Equal(["架空"], hall.Aliases);
+        Assert.Equal(["加工ホール"], hall.Misrecognitions);
+        Assert.Equal("import:初期辞書.json", hall.Source);
+        Assert.Equal(["林業書", "輪議書"], dictionary.Entries.Single(e => e.Term == "稟議書").Misrecognitions);
 
-        var again = dictionary.Import("""[ { "term": "共通テスト", "misrecognitions": ["凶通テスト"] } ]""", "追加.json");
+        var again = dictionary.Import("""[ { "term": "稟議書", "misrecognitions": ["稟儀書"] } ]""", "追加.json");
         Assert.Equal(0, again.Added);
         Assert.Equal(1, again.Merged);
         Assert.Equal(3, new TermDictionary(FilePath).Entries.Count); // saved, no duplicates
-        Assert.Contains("凶通テスト", new TermDictionary(FilePath).Entries.Single(e => e.Term == "共通テスト").Misrecognitions);
+        Assert.Contains("稟儀書", new TermDictionary(FilePath).Entries.Single(e => e.Term == "稟議書").Misrecognitions);
     }
 
     [Fact]
@@ -80,18 +80,18 @@ public sealed class TermDictionaryTests : IDisposable
     public void Entries_CanBeAddedEditedRemoved_AndSwitchedOff()
     {
         var dictionary = new TermDictionary(FilePath);
-        var entry = new TermEntry { Term = " 推薦入試 ", Misrecognitions = ["水仙入試", " "], Category = "教育・受験用語" };
+        var entry = new TermEntry { Term = " 見積書 ", Misrecognitions = ["三積書", " "], Category = "業務用語" };
         dictionary.Upsert(entry);
-        Assert.Equal("推薦入試", dictionary.Entries.Single().Term);
-        Assert.Equal(["水仙入試"], dictionary.Entries.Single().Misrecognitions);
+        Assert.Equal("見積書", dictionary.Entries.Single().Term);
+        Assert.Equal(["三積書"], dictionary.Entries.Single().Misrecognitions);
 
-        entry.Reading = "すいせんにゅうし";
+        entry.Reading = "みつもりしょ";
         dictionary.Upsert(entry);
-        Assert.Equal("すいせんにゅうし", new TermDictionary(FilePath).Entries.Single().Reading);
+        Assert.Equal("みつもりしょ", new TermDictionary(FilePath).Entries.Single().Reading);
 
-        dictionary.SetCategoryEnabled("教育・受験用語", false);
+        dictionary.SetCategoryEnabled("業務用語", false);
         Assert.Empty(dictionary.ActiveEntries);
-        dictionary.SetCategoryEnabled("教育・受験用語", true);
+        dictionary.SetCategoryEnabled("業務用語", true);
         dictionary.SetUseForCorrection(false);
         Assert.Empty(dictionary.ActiveEntries); // master switch: nothing is used
         dictionary.SetUseForCorrection(true);
@@ -105,15 +105,15 @@ public sealed class TermDictionaryTests : IDisposable
     public void Candidates_NeedApproval_RejectedOnesAreNotProposedAgain()
     {
         var dictionary = new TermDictionary(FilePath);
-        Assert.True(dictionary.AddCandidate("加工学園", "架空学園", "ユーザーの修正", "会議"));
-        dictionary.AddCandidate("加工学園", "架空学園", "ユーザーの修正", "会議2");
+        Assert.True(dictionary.AddCandidate("加工ホール", "架空ホール", "ユーザーの修正", "会議"));
+        dictionary.AddCandidate("加工ホール", "架空ホール", "ユーザーの修正", "会議2");
         Assert.Equal(2, dictionary.Data.Candidates.Single().Count);
         Assert.Empty(dictionary.Entries); // nothing registered without approval
 
-        var entry = dictionary.Approve(dictionary.Data.Candidates.Single().Id, "学校名");
-        Assert.Equal("架空学園", entry.Term);
-        Assert.Equal(["加工学園"], entry.Misrecognitions);
-        Assert.False(dictionary.AddCandidate("加工学園", "架空学園", "ユーザーの修正", null)); // already known
+        var entry = dictionary.Approve(dictionary.Data.Candidates.Single().Id, "施設名");
+        Assert.Equal("架空ホール", entry.Term);
+        Assert.Equal(["加工ホール"], entry.Misrecognitions);
+        Assert.False(dictionary.AddCandidate("加工ホール", "架空ホール", "ユーザーの修正", null)); // already known
 
         dictionary.AddCandidate("雨天", "運転", "AI校正", null);
         dictionary.Reject(dictionary.Data.Candidates.Single().Id);
@@ -136,55 +136,55 @@ public sealed class TermDictionaryTests : IDisposable
     {
         var entries = new[]
         {
-            new TermEntry { Term = "架空学園高校", Misrecognitions = ["加工学園高校"] },
-            new TermEntry { Term = "共通テスト", Reading = "きょうつうてすと" },
-            new TermEntry { Term = "総合型選抜" },
+            new TermEntry { Term = "架空ホール", Misrecognitions = ["加工ホール"] },
+            new TermEntry { Term = "稟議書", Reading = "りんぎしょ" },
+            new TermEntry { Term = "定例報告会" },
             new TermEntry { Term = "未来中学校" },
         };
 
-        var related = TermMatcher.Related(entries, "加工学園高校の説明会と、共通テストの日程、それから総合型選考の話をしました。");
+        var related = TermMatcher.Related(entries, "加工ホールの説明会と、稟議書の締め切り、それから定例報告書の話をしました。");
         var terms = related.Select(m => m.Entry.Term).ToList();
-        Assert.Contains("架空学園高校", terms);   // via a known misrecognition
-        Assert.Contains("共通テスト", terms);     // exact
-        Assert.Contains("総合型選抜", terms);     // similar spelling (fuzzy)
+        Assert.Contains("架空ホール", terms);   // via a known misrecognition
+        Assert.Contains("稟議書", terms);     // exact
+        Assert.Contains("定例報告会", terms);     // similar spelling (fuzzy)
         Assert.DoesNotContain("未来中学校", terms); // unrelated: not sent to the AI
     }
 }
 
 public sealed class TranscriptCorrectorTests
 {
-    private const string Transcript = "加工学園高校の説明会は三月五日です。担当は田中さんです。今日通テストの対策も話しました。";
+    private const string Transcript = "加工ホールの説明会は三月五日です。担当は田中さんです。稟儀書の書き方も話しました。";
 
-    private static readonly TermEntry School = new() { Term = "架空学園高校", Misrecognitions = ["加工学園高校"], Category = "学校名" };
-    private static readonly TermEntry Exam = new() { Term = "共通テスト", Reading = "きょうつうてすと", Category = "教育・受験用語" };
+    private static readonly TermEntry Hall = new() { Term = "架空ホール", Misrecognitions = ["加工ホール"], Category = "施設名" };
+    private static readonly TermEntry Form = new() { Term = "稟議書", Reading = "りんぎしょ", Category = "業務用語" };
 
     [Fact]
     public void Parse_ReadsTheProposalLines()
     {
         var proposals = TranscriptCorrector.Parse("""
-            - 原文「加工学園高校」→ 修正「架空学園高校」（理由: 学校名の誤認識／確信: 高）
-            - 原文「今日通テスト」→修正「共通テスト」(理由: 読みが近い／確信: 低)
+            - 原文「加工ホール」→ 修正「架空ホール」（理由: 施設名の誤認識／確信: 高）
+            - 原文「林業書」→修正「稟議書」(理由: 読みが近い／確信: 低)
             なし
             """);
         Assert.Equal(2, proposals.Count);
         Assert.True(proposals[0].Confident);
-        Assert.Equal("学校名の誤認識", proposals[0].Reason);
+        Assert.Equal("施設名の誤認識", proposals[0].Reason);
         Assert.False(proposals[1].Confident);
     }
 
     [Fact]
     public void DictionaryBackedChange_IsApplied()
     {
-        var result = TranscriptCorrector.Apply(Transcript, [new("加工学園高校", "架空学園高校", "学校名", true)], [School, Exam]);
-        Assert.StartsWith("架空学園高校の説明会", result.Clean);
+        var result = TranscriptCorrector.Apply(Transcript, [new("加工ホール", "架空ホール", "施設名", true)], [Hall, Form]);
+        Assert.StartsWith("架空ホールの説明会", result.Clean);
         Assert.Equal(CorrectionStatus.Applied, result.Decisions.Single().Status);
     }
 
     [Fact]
     public void ReadingLikeChange_FromTheDictionary_IsApplied()
     {
-        var result = TranscriptCorrector.Apply(Transcript, [new("今日通テスト", "共通テスト", "読み", true)], [School, Exam]);
-        Assert.Contains("共通テストの対策", result.Clean);
+        var result = TranscriptCorrector.Apply(Transcript, [new("稟儀書", "稟議書", "読み", true)], [Hall, Form]);
+        Assert.Contains("稟議書の書き方", result.Clean);
     }
 
     [Fact]
@@ -194,20 +194,20 @@ public sealed class TranscriptCorrectorTests
         [
             new("田中", "山中", "人名", true),             // a person's name: never changed automatically
             new("三月五日", "三月十五日", "日付", true),     // numbers: never changed automatically
-            new("加工学園高校", "架空学園高校", "学校名", false), // low confidence
-        ], [School, Exam]);
+            new("加工ホール", "架空ホール", "施設名", false), // low confidence
+        ], [Hall, Form]);
 
         Assert.Equal(Transcript, result.Clean); // nothing applied
         Assert.All(result.Decisions, d => Assert.Equal(CorrectionStatus.NeedsReview, d.Status));
         Assert.Contains("田中〔要確認: 山中？〕", result.Annotated);
         Assert.Contains("三月五日〔要確認: 三月十五日？〕", result.Annotated);
-        Assert.Contains("加工学園高校〔要確認: 架空学園高校？〕", result.Annotated);
+        Assert.Contains("加工ホール〔要確認: 架空ホール？〕", result.Annotated);
     }
 
     [Fact]
     public void ProposalNotInTheTranscript_IsRejected()
     {
-        var result = TranscriptCorrector.Apply(Transcript, [new("予算は百万円", "予算は二百万円", "", true)], [School]);
+        var result = TranscriptCorrector.Apply(Transcript, [new("予算は百万円", "予算は二百万円", "", true)], [Hall]);
         Assert.Equal(Transcript, result.Clean);
         Assert.Equal(Transcript, result.Annotated);
         Assert.Equal(CorrectionStatus.Rejected, result.Decisions.Single().Status);
@@ -217,7 +217,7 @@ public sealed class TranscriptCorrectorTests
     public void Dictionary_IsNeverAppliedMechanically()
     {
         // The misrecognition is in the dictionary and in the text, but the AI proposed nothing.
-        var result = TranscriptCorrector.Apply(Transcript, [], [School, Exam]);
+        var result = TranscriptCorrector.Apply(Transcript, [], [Hall, Form]);
         Assert.Equal(Transcript, result.Clean);
     }
 
@@ -227,7 +227,7 @@ public sealed class TranscriptCorrectorTests
         var model = new ScriptedGenerator("なし", "## 決定事項\n- なし");
         var steps = new List<MinutesProgress>();
         await new MinutesGenerator(model).GenerateAsync(Transcript, "会議", DateTime.Now,
-            new SynchronousProgress<MinutesProgress>(steps.Add), dictionary: [School]);
+            new SynchronousProgress<MinutesProgress>(steps.Add), dictionary: [Hall]);
 
         var names = steps.Select(s => s.Step).Distinct().ToList();
         Assert.Equal(["文字起こしを校正", "議事録を作成"], names);
@@ -238,18 +238,18 @@ public sealed class TranscriptCorrectorTests
     public async Task Pipeline_CorrectsFirst_ThenSummarizesTheCorrectedText_WithAnAppendix()
     {
         var model = new ScriptedGenerator(
-            "- 原文「加工学園高校」→ 修正「架空学園高校」（理由: 学校名／確信: 高）\n- 原文「田中」→ 修正「山中」（確信: 高）",
-            "## 決定事項\n- 説明会は三月五日（原文:「架空学園高校の説明会は三月五日です」）");
-        var draft = await new MinutesGenerator(model).GenerateAsync(Transcript, "会議", DateTime.Now, dictionary: [School, Exam]);
+            "- 原文「加工ホール」→ 修正「架空ホール」（理由: 施設名／確信: 高）\n- 原文「田中」→ 修正「山中」（確信: 高）",
+            "## 決定事項\n- 説明会は三月五日（原文:「架空ホールの説明会は三月五日です」）");
+        var draft = await new MinutesGenerator(model).GenerateAsync(Transcript, "会議", DateTime.Now, dictionary: [Hall, Form]);
 
         Assert.Equal(2, model.Prompts.Count);                       // two separate steps
-        Assert.Contains("架空学園高校", model.Prompts[0]);            // related term sent as a hint
-        Assert.Contains("架空学園高校の説明会", model.Prompts[1]);      // minutes read the corrected text
+        Assert.Contains("架空ホール", model.Prompts[0]);            // related term sent as a hint
+        Assert.Contains("架空ホールの説明会", model.Prompts[1]);      // minutes read the corrected text
         Assert.Contains("## 校正の記録", draft.Markdown);
-        Assert.Contains("「加工学園高校」→「架空学園高校」：修正済み", draft.Markdown);
+        Assert.Contains("「加工ホール」→「架空ホール」：修正済み", draft.Markdown);
         Assert.Contains("「田中」→「山中」：要確認（原文のまま）", draft.Markdown);
         Assert.Contains("田中〔要確認: 山中？〕", draft.Markdown);
-        Assert.DoesNotContain("説明会は三月五日（原文:「架空学園高校の説明会は三月五日です」） ⚠", draft.Markdown); // quote found in the corrected text
+        Assert.DoesNotContain("説明会は三月五日（原文:「架空ホールの説明会は三月五日です」） ⚠", draft.Markdown); // quote found in the corrected text
     }
 }
 
@@ -268,10 +268,10 @@ public sealed class CorrectionLearningTests : IDisposable
     [Fact]
     public void ChangedWords_FindsUserFixes_IncludingAcceptedReviewMarks()
     {
-        string before = "加工学園高校の説明会です。担当は田中〔要確認: 山中？〕さんです。変更のない文です。";
-        string after = "架空学園高校の説明会です。担当は山中さんです。変更のない文です。新しく足した文です。";
+        string before = "加工ホールの説明会です。担当は田中〔要確認: 山中？〕さんです。変更のない文です。";
+        string after = "架空ホールの説明会です。担当は山中さんです。変更のない文です。新しく足した文です。";
         var pairs = CorrectionLearning.ChangedWords(before, after);
-        Assert.Contains(("加工学園高校", "架空学園高校"), pairs); // widened to the whole word
+        Assert.Contains(("加工ホール", "架空ホール"), pairs); // widened to the whole word
         Assert.Contains(("田中", "山中"), pairs);
         Assert.Equal(2, pairs.Count); // the added sentence is not a "correction"
     }
@@ -281,13 +281,13 @@ public sealed class CorrectionLearningTests : IDisposable
     {
         var dictionary = new TermDictionary(Path.Combine(_dir, "dictionary.json"));
         const string marker = "> 校正済み";
-        CorrectionLearning.SaveSnapshot(_dir, "note1", "加工学園高校の説明会です。");
-        string note = $"# 議事録\n\n{marker}\n架空学園高校の説明会です。\n";
+        CorrectionLearning.SaveSnapshot(_dir, "note1", "加工ホールの説明会です。");
+        string note = $"# 議事録\n\n{marker}\n架空ホールの説明会です。\n";
 
         int found = CorrectionLearning.Harvest(_dir, dictionary, id => id == "note1" ? ("会議（AI議事録）", note) : null, marker);
         Assert.Equal(1, found);
         var candidate = dictionary.Data.Candidates.Single();
-        Assert.Equal(("加工学園高校", "架空学園高校"), (candidate.Heard, candidate.Correct));
+        Assert.Equal(("加工ホール", "架空ホール"), (candidate.Heard, candidate.Correct));
         Assert.Equal("会議（AI議事録）", candidate.Note);
         Assert.Empty(dictionary.Entries); // not registered yet
 
@@ -299,8 +299,8 @@ public sealed class CorrectionLearningTests : IDisposable
     {
         var dictionary = new TermDictionary(Path.Combine(_dir, "dictionary.json"));
         Assert.Null(dictionary.WhisperHintText());
-        dictionary.Upsert(new TermEntry { Term = "共通テスト", WhisperHint = true });
-        dictionary.Upsert(new TermEntry { Term = "総合型選抜" });
-        Assert.Equal("用語: 共通テスト。", dictionary.WhisperHintText());
+        dictionary.Upsert(new TermEntry { Term = "稟議書", WhisperHint = true });
+        dictionary.Upsert(new TermEntry { Term = "定例報告会" });
+        Assert.Equal("用語: 稟議書。", dictionary.WhisperHintText());
     }
 }

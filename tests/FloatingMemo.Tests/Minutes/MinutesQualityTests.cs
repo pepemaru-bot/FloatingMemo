@@ -6,44 +6,44 @@ namespace FloatingMemo.Tests.Minutes;
 /// <summary>
 /// A made-up meeting used to compare models under identical conditions: the person's own notes
 /// and a speech-recognition transcript with typical errors, plus what a correct minutes draft
-/// must and must not contain. No real people, schools or meetings.
+/// must and must not contain. No real people, places or meetings.
 /// </summary>
 public static class EvaluationMeeting
 {
     public const string HumanNotes = """
-        # 学習相談の打ち合わせ（架空）
-        - 参加: 講師 山本、保護者 佐々木
-        - 気になる点: 算数の割合、架空学園中学校の過去問
+        # 地域清掃イベントの打ち合わせ（架空）
+        - 参加: 実行委員 山本、自治会 佐々木
+        - 気になる点: ゴミ袋の数、架空ホールの予約
         """;
 
-    // Contains misrecognitions the dictionary knows: 「加工学園」(架空学園), 「時方」(解き方).
+    // Contains misrecognitions the dictionary knows: 「加工ホール」(架空ホール), 「美品」(備品).
     public const string Transcript = """
-        今日は加工学園中学校の過去問の進め方について話しました。
-        割合の問題は時方を確認してから解き直すことに決まりました。
-        過去問は毎週土曜日に一年分ずつ進めることで合意しました。
-        模試の申し込みは山本さんが今週金曜日までに行います。
-        志望校を一つ増やすかどうかは、次回の面談までに検討しましょう。
-        塾の宿題の量を減らすかはまだ決まっていません。
+        今日は加工ホールでの清掃イベントの進め方について話しました。
+        ゴミ袋は美品の在庫を確認してから追加で買うことに決まりました。
+        集合は毎月第一土曜日の朝九時にすることで合意しました。
+        ホールの予約は山本さんが今週金曜日までに行います。
+        雨天時の会場を一つ増やすかどうかは、次回の打ち合わせまでに検討しましょう。
+        参加賞の量を減らすかはまだ決まっていません。
         """;
 
     public static string Note => HumanNotes + "\n\n以下、AIによる文字起こし\n" + Transcript.Replace("\r\n", "\n").Trim();
 
     public static IReadOnlyList<TermEntry> Dictionary { get; } =
     [
-        new() { Term = "架空学園中学校", Aliases = ["架空学園"], Misrecognitions = ["加工学園"], Category = "学校名（東京都）" },
-        new() { Term = "解き方", Misrecognitions = ["時方"], Category = "指導・学習管理" },
-        new() { Term = "過去問", Category = "受験・志望校" },
-        new() { Term = "模試", Category = "塾・教材・試験" },
+        new() { Term = "架空ホール", Misrecognitions = ["加工ホール"], Category = "施設名" },
+        new() { Term = "備品", Misrecognitions = ["美品"], Category = "一般用語" },
+        new() { Term = "ゴミ袋", Category = "一般用語" },
+        new() { Term = "参加賞", Category = "イベント" },
     ];
 
     /// <summary>Things a correct draft states as decisions (each item: words that must appear together).</summary>
-    public static readonly string[][] ExpectedDecisions = [["解き直"], ["土曜"]];
+    public static readonly string[][] ExpectedDecisions = [["追加"], ["土曜"]];
 
     /// <summary>Open questions that must NOT appear as decisions.</summary>
-    public static readonly string[] MustNotBeDecisions = ["志望校", "宿題"];
+    public static readonly string[] MustNotBeDecisions = ["雨天", "参加賞"];
 
     /// <summary>The one task with a stated owner and deadline.</summary>
-    public static readonly string[] ExpectedTodo = ["模試", "山本", "金曜"];
+    public static readonly string[] ExpectedTodo = ["予約", "山本", "金曜"];
 }
 
 public sealed class MinutesQualityTests
@@ -59,26 +59,26 @@ public sealed class MinutesQualityTests
 
         var evaluation = NoteSections.Split(EvaluationMeeting.Note);
         Assert.Contains("気になる点", evaluation.HumanNotes);
-        Assert.Contains("模試の申し込み", evaluation.AllTranscripts);
+        Assert.Contains("ホールの予約", evaluation.AllTranscripts);
         Assert.DoesNotContain("気になる点", evaluation.AllTranscripts);
     }
 
     private const string GoodDraft = """
         # 議事録（AI下書き）
         ## 会議の概要
-        - 架空学園中学校の過去問の進め方を話した。
+        - 架空ホールでの清掃イベントの進め方を話した。
         ## 主な議題
-        - 過去問の進め方
+        - 清掃イベントの進め方
         ## 議論の要点
         - なし
         ## 決定事項
-        - 割合は解き方を確認してから解き直す（原文:「割合の問題は時方を確認してから解き直すことに決まりました」）
-        - 過去問は毎週土曜日に一年分（原文:「過去問は毎週土曜日に一年分ずつ進めることで合意しました」）
+        - ゴミ袋は備品の在庫を確認してから追加で買う（原文:「ゴミ袋は美品の在庫を確認してから追加で買うことに決まりました」）
+        - 集合は毎月第一土曜日の朝九時（原文:「集合は毎月第一土曜日の朝九時にすることで合意しました」）
         ## ToDo（担当者・期限）
-        - [ ] 模試の申し込み — 担当: 山本 / 期限: 今週金曜日（原文:「模試の申し込みは山本さんが今週金曜日までに行います」）
+        - [ ] ホールの予約 — 担当: 山本 / 期限: 今週金曜日（原文:「ホールの予約は山本さんが今週金曜日までに行います」）
         ## 未決事項
-        - 志望校を一つ増やすか（原文:「志望校を一つ増やすかどうかは、次回の面談までに検討しましょう」）
-        - 塾の宿題の量（原文:「塾の宿題の量を減らすかはまだ決まっていません」）
+        - 雨天時の会場を一つ増やすか（原文:「雨天時の会場を一つ増やすかどうかは、次回の打ち合わせまでに検討しましょう」）
+        - 参加賞の量（原文:「参加賞の量を減らすかはまだ決まっていません」）
         ## 次回確認事項
         - なし
         """;
@@ -96,12 +96,12 @@ public sealed class MinutesQualityTests
     {
         const string bad = """
             ## 主な議題
-            - 過去問の進め方について
-            - 過去問の進め方について。
+            - 清掃イベントの進め方について
+            - 清掃イベントの進め方について。
             ## 決定事項
-            - 志望校を一つ増やす（原文:「志望校を一つ増やすかどうかは、次回の面談までに検討しましょう」）
+            - 雨天時の会場を一つ増やす（原文:「雨天時の会場を一つ増やすかどうかは、次回の打ち合わせまでに検討しましょう」）
             - 予算を増やす
-            - 加工学園中学校の過去問を進める（原文:「今日は加工学園中学校の過去問の進め方について話しました」）
+            - 加工ホールでの清掃イベントを進める（原文:「今日は加工ホールでの清掃イベントの進め方について話しました」）
             - 来月から週二回にする（原文:「来月から週二回にします」）
             ## ToDo（担当者・期限）
             - [ ] 内容 — 担当: 未確認 / 期限: 未確認
@@ -115,14 +115,14 @@ public sealed class MinutesQualityTests
         Assert.Equal(1, report.Count(QualityReport.UndecidedAsDecision));      // 「検討しましょう」 as a decision
         Assert.Equal(2, report.Count(QualityReport.UnsupportedDecision));      // no quote / quote not in the transcript
         Assert.Equal(4, report.Count(QualityReport.Dummy));                    // template text (twice), empty item, "…" quote
-        Assert.Equal(1, report.Count(QualityReport.Misrecognition));           // 加工学園 left as is
+        Assert.Equal(1, report.Count(QualityReport.Misrecognition));           // 加工ホール left as is
         Assert.Contains("重複 1", report.Summary());
     }
 
     [Fact]
     public void CorrectionAppendix_IsNotJudged()
     {
-        string draft = GoodDraft + "\n---\n\n## 校正の記録\n- 「時方」→「解き方」：修正済み\n\n## 校正済み文字起こし\n\n加工学園〔要確認: 架空学園？〕\n";
+        string draft = GoodDraft + "\n---\n\n## 校正の記録\n- 「美品」→「備品」：修正済み\n\n## 校正済み文字起こし\n\n加工ホール〔要確認: 架空ホール？〕\n";
         Assert.Empty(MinutesQuality.Analyze(draft, EvaluationMeeting.Transcript, EvaluationMeeting.Dictionary).Issues);
     }
 }

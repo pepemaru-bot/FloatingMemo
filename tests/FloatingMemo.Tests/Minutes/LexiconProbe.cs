@@ -41,7 +41,7 @@ public sealed class LexiconProbe(ITestOutputHelper output)
             Assert.Equal(0, again.Added);
 
             // Only related terms are picked for a (made-up) sentence.
-            const string sample = "渋渋の過去問と、時方の確認をしました。偏差値と志望校の話もしました。";
+            const string sample = "架空ホールの予約と、林業書の確認をしました。定例報告会の日程の話もしました。";
             var related = TermMatcher.Related(dictionary.ActiveEntries, sample);
             output.WriteLine("related to the sample: " + string.Join("、", related.Select(m => $"{m.Entry.Term}({m.FoundForm}:{m.Score:0.00})")));
             var sw = System.Diagnostics.Stopwatch.StartNew();

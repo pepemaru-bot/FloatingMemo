@@ -39,14 +39,19 @@ public sealed class FactMinutesTests
         public Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
         {
             Prompts.Add(user);
-            return Task.FromResult(answers[Math.Min(_next++, answers.Length - 1)]);
+            // Once the script is used up (e.g. the recovery pass), nothing more is found.
+            return Task.FromResult(_next < answers.Length ? answers[_next++] : string.Empty);
         }
     }
 
-    private static (MinutesDraft Draft, Scripted Model) Run(string note, params string[] answers)
+    private static (MinutesDraft Draft, Scripted Model) Run(string note, params string[] answers) =>
+        Run(MinutesPriority.Auto, note, answers);
+
+    private static (MinutesDraft Draft, Scripted Model) Run(MinutesPriority priority, string note, params string[] answers)
     {
         var model = new Scripted(answers);
-        var draft = new MinutesGenerator(model, MinutesStyle.Facts).GenerateAsync(note, "定例", new DateTime(2026, 10, 16, 9, 0, 0)).Result;
+        var draft = new MinutesGenerator(model, MinutesStyle.Facts) { Priority = priority }
+            .GenerateAsync(note, "定例", new DateTime(2026, 10, 16, 9, 0, 0)).Result;
         return (draft, model);
     }
 
@@ -65,7 +70,7 @@ public sealed class FactMinutesTests
     public void Prompt_ShowsNumberedUnits_AndNotesGoToTheFirstPart()
     {
         var (_, model) = Run(Note, Answer);
-        string prompt = model.Prompts.Single();
+        string prompt = model.Prompts[0];
         Assert.Contains("A002 - 事前資料: 予算の上限は三百万円", prompt);
         Assert.Contains("B002 リリース日は十一月二十日に決まりました。", prompt);
         Assert.DoesNotContain(TranscriptInsertion.Header, prompt);
@@ -118,6 +123,35 @@ public sealed class FactMinutesTests
     }
 
     [Fact]
+    public void ImportantUncitedStatements_AreExtractedAgain_AndJoinTheLedger()
+    {
+        // First pass misses the proposal (B006); the recovery pass is asked about exactly that range.
+        const string recovered = "{\"type\":\"提案\",\"topic\":\"広報\",\"text\":\"広報のブログを出したらどうかという提案があった\",\"src\":[\"B006\"]}";
+        var (draft, model) = Run(MinutesPriority.Quality, Note, Answer, recovered);
+        Assert.Equal(2, model.Prompts.Count);
+        Assert.Contains("議事録にまだ入っていない", model.Prompts[1]);
+        Assert.Contains("B006 広報のブログを", model.Prompts[1]);
+        Assert.DoesNotContain("B002 リリース日", model.Prompts[1]); // only the missing range
+        Assert.Contains(draft.Facts!, f => f.Sources.Contains("B006") && f.Kind == FactKind.Proposal);
+        Assert.DoesNotContain(draft.Warnings, w => w.Contains("B006"));
+        Assert.Matches("found=1", draft.Run!.InputMode);
+    }
+
+    [Fact]
+    public void ContradictingFacts_AreBothKept_AndFlagged()
+    {
+        var merged = FactMinutes.Merge(
+        [
+            new Fact(FactKind.Decision, "リリース日", "リリース日は11月20日", ["B001"], "", "") { Id = "F001" },
+            new Fact(FactKind.Decision, "リリース日", "リリース日は11月27日", ["B009"], "", "") { Id = "F002" },
+        ]);
+        var facts = merged.Single().Facts;
+        Assert.Equal(2, facts.Count);
+        Assert.Contains("F002と食い違う", facts[0].Issues);
+        Assert.Contains("F001と食い違う", facts[1].Issues);
+    }
+
+    [Fact]
     public void UncitedStatements_AreReported_FillersAreNot()
     {
         var (draft, _) = Run(Note, Answer);
@@ -138,8 +172,9 @@ public sealed class FactMinutesTests
         Assert.Equal(units.Select(u => u.Id), parts.SelectMany(p => p).Select(u => u.Id));
         Assert.All(parts, p => Assert.True(p.Sum(u => FactMinutes.EstimateTokens(u.Text) + 3) <= 8192 - FactPrompt.MaxAnswerTokens - 512));
 
-        var (draft, model) = Run(note, "{\"type\":\"情報\",\"topic\":\"資料\",\"text\":\"資料を確認した\",\"src\":[\"B001\"]}");
-        Assert.Equal(parts.Count, model.Prompts.Count);
+        var (draft, model) = Run(note, Enumerable.Repeat("{\"type\":\"情報\",\"topic\":\"資料\",\"text\":\"資料を確認した\",\"src\":[\"B001\"]}", parts.Count).ToArray());
+        // Every part, then at most MaxRecoveryRanges recovery calls for statements no fact used.
+        Assert.InRange(model.Prompts.Count, parts.Count, parts.Count + FactMinutes.MaxRecoveryRanges);
         Assert.Contains("【文脈】", model.Prompts[1]);
         Assert.Empty(draft.Run!.Unprocessed);
     }
@@ -154,16 +189,27 @@ public sealed class FactMinutesTests
     }
 
     [Theory]
-    [InlineData("決定", "テスト計画は森さんが来週の水曜日までに作ることになりました。", "森", "来週の水曜日")]
-    [InlineData("提案", "問い合わせフォームの修正は石井さんが今週中に行います。", "石井", "今週中")]
-    public void ADecisionNamingWhoAndBy_IsATask_WithBothTakenFromTheSource(string kind, string said, string who, string due)
+    [InlineData("決定", "テスト計画は森さんが来週の水曜日までに作ることになりました。", "テスト計画を作る", "森", "来週の水曜日")]
+    [InlineData("提案", "問い合わせフォームの修正は石井さんが今週中に行います。", "問い合わせフォームの修正", "石井", "今週中")]
+    public void ADecisionNamingWhoAndBy_IsATask_WithBothTakenFromTheSource(string kind, string said, string text, string who, string due)
     {
         var units = new[] { new SourceUnit("B001", said, false) }.ToDictionary(u => u.Id);
-        var fact = FactMinutes.Check(new Fact(kind, "t", "作業", ["B001"], "", ""), units, new HashSet<string> { "B001" });
+        var fact = FactMinutes.Check(new Fact(kind, "t", text, ["B001"], "", ""), units, new HashSet<string> { "B001" });
         Assert.Equal(FactKind.Task, fact.Kind);
         Assert.Equal(who, fact.Who);
         Assert.Equal(due, fact.Due);
         Assert.Empty(fact.Issues);
+    }
+
+    [Theory]
+    [InlineData("今日の定例会議でリリース日を決めました。", FactKind.Decision)]
+    [InlineData("リリース日は来週決めましょう。", FactKind.Open)]
+    [InlineData("担当者はまだ決めていません。", FactKind.Open)]
+    public void DecidedInPlainWords_StaysADecision(string said, string expected)
+    {
+        var units = new[] { new SourceUnit("B001", said, false) }.ToDictionary(u => u.Id);
+        var fact = FactMinutes.Check(new Fact(FactKind.Decision, "リリース日", said.TrimEnd('。'), ["B001"], "", ""), units, new HashSet<string> { "B001" });
+        Assert.Equal(expected, fact.Kind);
     }
 
     [Fact]
@@ -200,7 +246,7 @@ public sealed class FactMinutesTests
     }
 
     [Fact]
-    public void ACitationOfAFillerOrAnotherSentence_IsMovedToTheMatchingSentence()
+    public void AWrongCitation_IsKept_AndFlagged_WithTheOneFullMatchAsASuggestion()
     {
         var units = new[]
         {
@@ -210,13 +256,49 @@ public sealed class FactMinutesTests
         }.ToDictionary(u => u.Id);
         var allowed = new HashSet<string>(units.Keys);
         var fact = FactMinutes.Check(new Fact(FactKind.Info, "アンケート", "回答は百二十件ありました", ["B003"], "", ""), units, allowed);
-        Assert.Equal(["B001"], fact.Sources);
-        Assert.Empty(fact.Issues);
+        Assert.Equal(["B003"], fact.Sources);                 // never moved automatically
+        Assert.False(fact.Verified);
+        Assert.Contains("候補: B001", fact.Issues);
+        Assert.Contains(fact.Issues, i => i.Contains("内容を示していない"));
 
         // No clear match: the citation stays and is flagged.
         var unclear = FactMinutes.Check(new Fact(FactKind.Info, "x", "会場は第三会議室", ["B002"], "", ""), units, allowed);
         Assert.Equal(["B002"], unclear.Sources);
         Assert.NotEmpty(unclear.Issues);
+    }
+
+    [Fact]
+    public void ADecisionNotSaidToBeDecided_IsNotShownAsADecision()
+    {
+        var units = new[]
+        {
+            new SourceUnit("B001", "移転日は三月の中旬の予定です。", false),
+            new SourceUnit("B002", "参加者は二十五人です。", false),
+        }.ToDictionary(u => u.Id);
+        var allowed = new HashSet<string>(units.Keys);
+        Assert.Equal(FactKind.Open, FactMinutes.Check(new Fact(FactKind.Decision, "移転日", "移転日は3月中旬", ["B001"], "", ""), units, allowed).Kind);
+        Assert.Equal(FactKind.Info, FactMinutes.Check(new Fact(FactKind.Decision, "参加者", "参加者は25人", ["B002"], "", ""), units, allowed).Kind);
+    }
+
+    [Fact]
+    public void AFactCitingOnlyContextLines_IsDropped_NotKeptWithoutASource()
+    {
+        var units = new[] { new SourceUnit("B001", "前の部分の文。", false), new SourceUnit("B002", "この部分の文。", false) }.ToDictionary(u => u.Id);
+        var allowed = new HashSet<string> { "B002" };
+        Assert.True(FactMinutes.OnlyContext(new Fact(FactKind.Info, "t", "前の部分", ["B001"], "", ""), allowed, units));
+        Assert.False(FactMinutes.OnlyContext(new Fact(FactKind.Info, "t", "両方", ["B001", "B002"], "", ""), allowed, units));
+        Assert.False(FactMinutes.OnlyContext(new Fact(FactKind.Info, "t", "番号が原文にない", ["B099"], "", ""), allowed, units)); // flagged instead
+    }
+
+    [Fact]
+    public void OneSentenceGivenTwoKinds_IsOneFact_TheMoreSpecificKind()
+    {
+        var merged = FactMinutes.Merge(
+        [
+            new Fact(FactKind.Open, "机の配置", "机の配置はまだ決まっていません", ["B006"], "", ""),
+            new Fact(FactKind.Proposal, "机の配置", "机の配置は、まだ決まっていません", ["B006"], "", ""),
+        ]);
+        Assert.Equal(FactKind.Open, merged.Single().Facts.Single().Kind);
     }
 
     [Fact]
@@ -252,4 +334,111 @@ public sealed class FactMinutesTests
 
     private static int CountOf(string text, string part) =>
         (text.Length - text.Replace(part, string.Empty, StringComparison.Ordinal).Length) / part.Length;
+
+    [Fact]
+    public void SpeedPriority_RecoversOnlyCriticalStatements_InOneRequest()
+    {
+        // B006 (a proposal) is not critical: on a CPU (Auto) it is reported, not extracted again.
+        var (auto, autoModel) = Run(Note, Answer);
+        Assert.Single(autoModel.Prompts);
+        Assert.Contains("speed", auto.Run!.InputMode);
+        Assert.Contains(auto.Warnings, w => w.Contains("B006"));
+
+        // Critical statements far apart go to the model together, in a single request.
+        const string note = """
+            - メモ
+
+            以下、AIによる文字起こし
+            開始します。会場は市民ホールに決まりました。天気の話をしました。景品の話もしました。受付は佐藤さんが金曜日までに準備します。雑談をしました。参加費は五百円で合意しました。
+            """;
+        const string first = """{"type":"情報","topic":"天気","text":"天気の話をした","src":["B003"]}""";
+        var (draft, model) = Run(MinutesPriority.Speed, note, first);
+        Assert.Equal(2, model.Prompts.Count);
+        Assert.Contains("B002 会場は市民ホール", model.Prompts[1]);
+        Assert.Contains("B005 受付は佐藤さん", model.Prompts[1]);
+        Assert.Contains("B007 参加費は五百円", model.Prompts[1]);
+        Assert.Contains("requests=1", draft.Run!.InputMode);
+    }
+
+    [Fact]
+    public void QualityPriority_SendsSeveralRangesPerRequest()
+    {
+        const string note = """
+            - メモ
+
+            以下、AIによる文字起こし
+            開始します。会場は市民ホールに決まりました。天気の話をしました。景品の話もしました。広報の課題が出ました。雑談をしました。旅行の話をしました。参加費は五百円で合意しました。
+            """;
+        const string first = """{"type":"情報","topic":"天気","text":"天気の話をした","src":["B003"]}""";
+        var (draft, model) = Run(MinutesPriority.Quality, note, first);
+        Assert.Equal(2, model.Prompts.Count); // three ranges, one request
+        Assert.Contains("B005 広報の課題", model.Prompts[1]);
+        Assert.Contains("quality", draft.Run!.InputMode);
+    }
+
+    [Fact]
+    public void ProceduralRemarks_AreNotFacts_NorReportedAsMissing()
+    {
+        Assert.True(SourceUnits.IsProcedural("次に予算です。"));
+        Assert.True(SourceUnits.IsProcedural("では、駐車場の件に移ります。"));
+        Assert.True(SourceUnits.IsProcedural("続いて広報について。"));
+        Assert.False(SourceUnits.IsProcedural("次に予算は百万円です。"));
+        Assert.False(SourceUnits.IsProcedural("まず先週の進捗を確認しました。"));
+        Assert.False(SourceUnits.IsProcedural("予算です。")); // no transition word
+
+        const string note = """
+            - メモ
+
+            以下、AIによる文字起こし
+            次に予算です。予算は百八十万円に増やすことで承認されました。
+            """;
+        const string answer = """
+            {"type":"提案","topic":"図面","text":"次に予算です","src":["B001"]}
+            {"type":"決定","topic":"予算","text":"予算は百八十万円に増やす","src":["B002"]}
+            """;
+        var (draft, _) = Run(note, answer);
+        Assert.DoesNotContain(draft.Facts!, f => f.Text.Contains("次に予算"));
+        Assert.Contains(draft.Facts!, f => f.Kind == FactKind.Decision);
+        Assert.DoesNotContain(draft.Warnings, w => w.Contains("B001"));
+    }
+
+    [Fact]
+    public void VagueTask_GetsItsObject_FromTheStatementBefore_OrIsMarkedForReview()
+    {
+        var units = SourceUnits.From(NoteSections.Split("""
+            - メモ
+
+            以下、AIによる文字起こし
+            引っ越し業者は二社から見積もりを取ります。山田さんが来週までに取ります。加藤さんが今月中にやります。
+            """));
+        var vague = new Fact(FactKind.Task, "引越し業者", "山田さんが来週までに取ります", ["B002"], "山田", "来週");
+        var clear = FactMinutes.Clarify(vague, units);
+        Assert.Equal("山田さんが来週までに二社から見積もりを取ります", clear.Text);
+        Assert.Equal(["B001", "B002"], clear.Sources);
+        Assert.Empty(clear.Issues);
+
+        var unknown = FactMinutes.Clarify(new Fact(FactKind.Task, "その他", "加藤さんが今月中にやります", ["B003"], "加藤", "今月中"), units);
+        Assert.Equal("加藤さんが今月中にやります", unknown.Text);
+        Assert.Contains("作業の内容が原文から分からない", unknown.Issues);
+
+        // A task that says what is left alone.
+        var plain = new Fact(FactKind.Task, "ポスター", "ポスターの作成は高橋さんが来週の金曜日までに行います", ["B002"], "高橋", "来週の金曜日");
+        Assert.Same(plain, FactMinutes.Clarify(plain, units));
+        var named = new Fact(FactKind.Task, "資料", "資料は森さんが明日までに送ります", ["B002"], "森", "明日");
+        Assert.Same(named, FactMinutes.Clarify(named, units));
+    }
+
+    [Fact]
+    public void RepeatedNumbers_AreNotExtractedAgain()
+    {
+        var units = SourceUnits.From(NoteSections.Split("""
+            - メモ
+
+            以下、AIによる文字起こし
+            開催日は十二月三日に決まりました。あ、三日、三日で大丈夫です。参加者は二十五人です。
+            """));
+        var facts = new List<Fact> { new(FactKind.Decision, "開催日", "開催日は十二月三日に決まりました", ["B001"], "", "") };
+        var ranges = FactMinutes.RecoveryRanges(units, facts, criticalOnly: true);
+        Assert.Equal(["B003"], ranges.SelectMany(r => r).Select(u => u.Id)); // 25 is new, 3 is not
+    }
 }

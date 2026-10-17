@@ -70,7 +70,7 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
     public WhisperPipelineOptions Options { get; init; } = WhisperPipelineOptions.Default;
 
     /// <summary>
-    /// Optional recognition hint (e.g. "用語: 共通テスト、総合型選抜。") from the user's dictionary:
+    /// Optional recognition hint (e.g. "用語: 稟議書、定例報告会。") from the user's dictionary:
     /// only the words the user marked as Whisper hints. Null or empty = no hint (the default).
     /// </summary>
     public Func<string?>? HintProvider { get; set; }

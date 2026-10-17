@@ -16,19 +16,19 @@ public sealed class TermEntry
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
 
-    /// <summary>The correct spelling (e.g. 「共通テスト」).</summary>
+    /// <summary>The correct spelling (e.g. 「稟議書」).</summary>
     public string Term { get; set; } = string.Empty;
 
-    /// <summary>Reading in kana (e.g. 「きょうつうてすと」), optional.</summary>
+    /// <summary>Reading in kana (e.g. 「りんぎしょ」), optional.</summary>
     public string? Reading { get; set; }
 
-    /// <summary>Abbreviations and other correct names (e.g. 「共テ」).</summary>
+    /// <summary>Abbreviations and other correct names (e.g. 「稟議」).</summary>
     public List<string> Aliases { get; set; } = [];
 
-    /// <summary>Known misrecognitions (e.g. 「今日通テスト」). Used only as hints, never replaced blindly.</summary>
+    /// <summary>Known misrecognitions (e.g. 「林業書」). Used only as hints, never replaced blindly.</summary>
     public List<string> Misrecognitions { get; set; } = [];
 
-    /// <summary>Group such as 学校名 / 教育・受験用語, used to switch whole groups on or off.</summary>
+    /// <summary>Group such as 施設名 / 業務用語, used to switch whole groups on or off.</summary>
     public string Category { get; set; } = "その他";
 
     /// <summary>Off = kept but not used as a hint.</summary>
@@ -318,7 +318,7 @@ public sealed class TermDictionary
 
     /// <summary>
     /// Imports a JSON term list chosen by the user. Accepted shapes: an array of entries, or an
-    /// object whose arrays are entries (array names become categories, e.g. {"学校名": [...]}).
+    /// object whose arrays are entries (array names become categories, e.g. {"施設名": [...]}).
     /// An entry is a string, or an object with a term field (term / word / name / 用語 / 名称 /
     /// 表記) and optional reading, aliases, misrecognitions and category fields. Existing terms
     /// are merged (spellings are added), never duplicated or deleted.
@@ -441,7 +441,7 @@ public sealed class TermDictionary
                 {
                     if (child is JsonArray or JsonObject)
                     {
-                        // {"学校名": [...]} -> category; wrapper keys like "entries"/"terms" keep the outer one.
+                        // {"施設名": [...]} -> category; wrapper keys like "entries"/"terms" keep the outer one.
                         bool wrapper = WrapperKeys.Contains(key);
                         Collect(child, wrapper ? category : (CategoryKeys.Contains(key) ? category : key), found, source);
                     }

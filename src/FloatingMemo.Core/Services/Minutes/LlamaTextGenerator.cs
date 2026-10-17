@@ -33,6 +33,24 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
 
     public string LastFinish { get; private set; } = MinutesFinish.Unknown;
 
+    /// <summary>Exact token count with this model's tokenizer (loads the model if it is not loaded yet).</summary>
+    /// <summary>Known once the model is loaded (all layers on the GPU, or none).</summary>
+    public bool? UsesGpu => _weights is null ? null : _parameters.GpuLayerCount > 0;
+
+    public int? CountTokens(string text)
+    {
+        _gate.Wait();
+        try
+        {
+            _weights ??= LoadAsync(CancellationToken.None).GetAwaiter().GetResult();
+            return _weights.Tokenize(text, false, true, Encoding.UTF8).Length;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>Where the user is told to put Qwen models (see <see cref="ModelLocations"/>).</summary>
     public static string ModelsDirectory => ModelLocations.RecommendedDirectory(ModelLocations.QwenFolder);
 
@@ -42,7 +60,7 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
     /// <summary>A GGUF model found on this PC, with what is known about it.</summary>
     public sealed record ModelInfo(string Path, string FileName, long Bytes, string Label, string Notes, bool Bundled);
 
-    /// <summary>What we measured or know about each candidate (Core i7-10700, CPU only).</summary>
+    /// <summary>What we measured or know about each candidate (an 8-core desktop CPU, CPU only).</summary>
     private static readonly Dictionary<string, (string Label, string Notes)> Known = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Qwen3-1.7B-Q8_0.gguf"] = ("Qwen3 1.7B（軽量）", "必要メモリ 約2.5GB・短い会議で約40〜50秒。内容の取り違えが多め"),

@@ -231,7 +231,7 @@ public sealed partial class MainPage : Page
         // The body is white paper in light and dark mode alike, so the editor uses its light
         // colors (dark text, dark cursor). In high contrast the page follows the system colors.
         var (theme, paper) = EditorColors();
-        var editor = await WebMarkdownEditor.CreateAsync(EditorWebView, userData, theme, paper);
+        var editor = await WebMarkdownEditor.CreateAsync(EditorWebView, userData, theme, paper, visual: _services?.Preferences.VisualEditor == true);
         if (editor is null)
         {
             UpdateTestMirrors();
@@ -381,7 +381,7 @@ public sealed partial class MainPage : Page
         bool web = ReferenceEquals(_editor, _markdownEditor);
         // Same line breaks as the TextBox ("\r") so tests work with either editor.
         AutomationProperties.SetName(_testMirrorText, (_workspace?.Active?.Text ?? string.Empty).Replace('\n', '\r'));
-        AutomationProperties.SetName(_testMirrorKind!, web ? "web" : "plain");
+        AutomationProperties.SetName(_testMirrorKind!, web ? (_markdownEditor!.Visual ? "visual" : "web") : "plain");
         AutomationProperties.SetName(_testMirrorCaret!, _markdownEditor?.CaretColor ?? string.Empty);
         bool focused = web ? _testEditorFocus : XamlRoot is not null && ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), MemoTextBox);
         AutomationProperties.SetName(_testMirrorFocus!, focused ? "focused" : "blurred");
@@ -1224,7 +1224,8 @@ public sealed partial class MainPage : Page
         {
             string noteId = source.Id;
             var template = _services.Templates.Find(_services.Preferences.MinutesTemplateId); // null = おまかせ
-            var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName), template).GenerateAsync(transcript, sourceTitle, DateTime.Now,
+            var priority = _services.Preferences.MinutesPriority;
+            var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName), template) { Priority = priority }.GenerateAsync(transcript, sourceTitle, DateTime.Now,
                 minutesProgress, cts.Token, dictionary, noteId));
             draft.Run?.Append(DateTime.Now); // sizes, parts and finish reasons only (%TEMP%, not the note text)
             var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), draft.Markdown);
