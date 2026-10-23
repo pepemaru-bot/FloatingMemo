@@ -1,6 +1,9 @@
 ﻿param([string]$NotesDir, [string]$FakeAudio, [string]$Project = (Join-Path $PSScriptRoot '..\..\src\FloatingMemo\FloatingMemo.csproj'))
 . (Join-Path $PSScriptRoot 'e2e-lib.ps1')
 try {
+  # Test recordings only (--recordings-dir): each suite starts with none.
+  $testRecordings = Join-Path (Split-Path $NotesDir) 'recordings'
+  if (Test-Path $testRecordings) { Remove-Item $testRecordings -Recurse -Force }
   if (Test-Path $NotesDir) { Remove-Item $NotesDir -Recurse -Force }
   # Point at a missing model: transcription then fails and the recording is kept, so its WAV can be inspected.
   $noModel = Join-Path $env:TEMP 'fm-e2e-no-model.bin'
@@ -39,7 +42,8 @@ try {
   SafeKeys 0x11, 0x52; Start-Sleep 3
   $info = InfoBarText "AudioInfoBar"
   Check "stop -> transcription attempted (no model in this test)" ($info -match 'Whisperモデル' -and $info -match 'がありません') $info
-  $wav = (Get-ChildItem (Join-Path $env:TEMP 'FloatingMemo\recordings') -Recurse -Filter recording.wav -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+  $recordings = Join-Path (Split-Path $NotesDir) 'recordings' # the test folder (--recordings-dir)
+  $wav = (Get-ChildItem $recordings -Recurse -Filter recording.wav -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
   Check "recording.wav exists" ($wav -and (Test-Path $wav)) $wav
   if ($wav -and (Test-Path $wav)) {
     $wi = WavInfo $wav
@@ -53,7 +57,7 @@ try {
 
   # Exit during recording -> confirmation; Yes discards and exits
   Invoke-Button "録音開始"; Start-Sleep 1
-  Check "new recording supersedes audio kept for retry" (-not (Test-Path $wav))
+  Check "audio kept for retry is not deleted by a new recording" (Test-Path $wav)
   $sessionsBefore = if ($wav) { Get-ChildItem (Split-Path (Split-Path $wav)) -Directory | Measure-Object | % Count } else { 0 }
   CloseWindow; Start-Sleep 2
   $dlg = FindDialog
@@ -62,14 +66,15 @@ try {
   Check "app exits after confirming" (WaitExit)
   if ($wav) {
     $sessionsAfter = Get-ChildItem (Split-Path (Split-Path $wav)) -Directory | Measure-Object | % Count
-    Check "discarded recording deleted" ($sessionsAfter -eq $sessionsBefore - 1) "$sessionsBefore -> $sessionsAfter"
+    Check "discarded recording deleted (the kept one stays)" ($sessionsAfter -eq $sessionsBefore - 1 -and (Test-Path $wav)) "$sessionsBefore -> $sessionsAfter"
   }
 
-  # Restart deletes recordings left behind by a crash
-  $leftover = Join-Path $env:TEMP 'FloatingMemo\recordings\rec-e2e-leftover'
+  # Recordings left behind (a crash, a kept retry) are offered at start-up, never deleted silently
+  $leftover = Join-Path $recordings 'rec-e2e-leftover'
   New-Item -ItemType Directory -Force $leftover | Out-Null; Set-Content (Join-Path $leftover 'Microphone.wav') 'x'
   Launch -Extra @('--fake-audio', $FakeAudio, '--model', $noModel)
-  Check "leftover recordings cleaned at startup" (-not (Test-Path $leftover))
+  Start-Sleep 2
+  Check "leftover recordings kept and offered at startup" ((Test-Path $leftover) -and (InfoBarText 'AudioInfoBar') -match '前回の録音が残っています') (InfoBarText 'AudioInfoBar')
   CloseWindow; [void](WaitExit)
 }
 catch { "ERROR: $_" }

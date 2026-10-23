@@ -54,6 +54,11 @@ try {
   # Settings opens and the test hook imports the sample (same code as the import button).
   OpenMenu; MenuInvoke 'MinutesSettings'
   $win = SettingsWindow
+  # The file is previewed first: nothing is saved until "読み込む".
+  $load = $null
+  for ($i = 0; $i -lt 40 -and -not $load; $i++) { Start-Sleep -Milliseconds 250; if ($win) { $load = $win.FindFirst([Windows.Automation.TreeScope]::Descendants, (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, '読み込む'))) } }
+  Check "template previewed before it is saved" ($null -ne $load -and -not (Test-Path $store))
+  if ($load) { $load.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke() }
   Start-Sleep 2
   $files = @(Get-ChildItem $store -Filter *.json -ErrorAction SilentlyContinue)
   Check "imported into the notes' private folder as JSON" ($files.Count -eq 1) $store

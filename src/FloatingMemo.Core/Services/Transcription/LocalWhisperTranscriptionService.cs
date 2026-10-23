@@ -44,6 +44,39 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
     /// </summary>
     public static string DefaultModelPath => ResolveDefaultModelPath(ModelLocations.AppModelsDirectory, ModelLocations.UserModelsDirectory);
 
+    /// <summary>The known Whisper models present in the model folders (first location wins), smallest first.</summary>
+    public static IReadOnlyList<(string Name, string Path)> InstalledModels(string? appModels = null, string? userModels = null)
+    {
+        var found = new List<(string, string)>();
+        foreach (string name in KnownModels)
+        {
+            foreach (var (dir, _) in ModelLocations.SearchDirectories(ModelLocations.WhisperFolder, appModels ?? ModelLocations.AppModelsDirectory, userModels ?? ModelLocations.UserModelsDirectory))
+            {
+                string path = Path.Combine(dir, name);
+                if (File.Exists(path))
+                {
+                    found.Add((name, path));
+                    break;
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The model the user chose (a file name such as ggml-small.bin) if it is installed, otherwise the default.</summary>
+    public static string ResolveModelPath(string? preferred, string? appModels = null, string? userModels = null) =>
+        InstalledModels(appModels, userModels).FirstOrDefault(m => string.Equals(m.Name, preferred, StringComparison.OrdinalIgnoreCase)).Path
+            ?? ResolveDefaultModelPath(appModels ?? ModelLocations.AppModelsDirectory, userModels ?? ModelLocations.UserModelsDirectory);
+
+    /// <summary>A short description for the settings (speed vs accuracy).</summary>
+    public static string Describe(string name) => name switch
+    {
+        "ggml-base.bin" => "base（速い・標準）",
+        "ggml-small.bin" => "small（誤認識が少ない・処理は約 3 倍の時間）",
+        _ => name,
+    };
+
     internal static string ResolveDefaultModelPath(string appModels, string userModels)
     {
         foreach (string name in KnownModels)
@@ -78,7 +111,17 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
     /// <summary>Diagnostics of the last transcription (no text): regions, removed repeats, timing.</summary>
     public TranscriptionDiagnostics? LastDiagnostics { get; private set; }
 
-    public async Task<TranscriptionResult> TranscribeAsync(Stream audio, CancellationToken cancellationToken = default, IProgress<double>? progress = null)
+    /// <summary>Audio is read and transcribed in windows of this length (memory stays small for hours of audio).</summary>
+    public TimeSpan WindowLength { get; init; } = TimeSpan.FromMinutes(10);
+
+    public Task<TranscriptionResult> TranscribeAsync(Stream audio, CancellationToken cancellationToken = default, IProgress<double>? progress = null) =>
+        TranscribeAsync(audio, cancellationToken, progress, checkpointPath: null);
+
+    /// <param name="checkpointPath">
+    /// Where finished windows are saved (next to the recording). A later call with the same audio
+    /// and model continues after the last finished window. Null = no checkpoint.
+    /// </param>
+    public async Task<TranscriptionResult> TranscribeAsync(Stream audio, CancellationToken cancellationToken, IProgress<double>? progress, string? checkpointPath)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -86,16 +129,17 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
         {
             WhisperFactory factory = await EnsureModelLoadedAsync(cancellationToken).ConfigureAwait(false);
             var started = System.Diagnostics.Stopwatch.StartNew();
-
-            // 16 kHz mono float samples (the recorder already produces that format).
-            float[] samples = await Task.Run(() => AudioPreparationReader.ReadMono16k(audio), cancellationToken).ConfigureAwait(false);
             const int rate = Audio.AudioPreparation.TargetSampleRate;
 
-            // Only stretches with speech go to Whisper: long silence is where loops start.
-            IReadOnlyList<SpeechRegion> speech = SpeechActivity.Detect(samples, rate);
-            IReadOnlyList<SpeechRegion> regions = Options.SkipSilence
-                ? SpeechActivity.GroupIntoChunks(speech, rate)
-                : [new SpeechRegion(0, samples.Length)];
+            // 16 kHz mono float samples, read one window at a time (the recorder already produces that format).
+            using var reader = new Mono16kReader(audio);
+            string model = Path.GetFileName(ModelPath);
+            var checkpoint = TranscriptionCheckpoint.Load(checkpointPath, model, reader.TotalSamples)
+                ?? new TranscriptionCheckpoint { Model = model, TotalSamples = reader.TotalSamples };
+            var segments = checkpoint.Segments.Select(c => new TranscriptSegment(TimeSpan.FromMilliseconds(c.StartMs), TimeSpan.FromMilliseconds(c.EndMs), c.Text)).ToList();
+            var speech = checkpoint.Speech.Where(r => r.Length == 2).Select(r => new SpeechRegion(r[0], r[1])).ToList();
+            long windowStart = checkpoint.ProcessedSamples;
+            await Task.Run(() => reader.Skip(windowStart), cancellationToken).ConfigureAwait(false);
 
             var builder = factory.CreateBuilder().WithThreads(_threads);
             builder = _language == "auto" ? builder.WithLanguageDetection() : builder.WithLanguage(_language);
@@ -114,12 +158,10 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
                 builder = builder.WithPrompt(hint);
             }
 
-            // Progress = speech already processed + whisper.cpp's own percentage for the current
-            // stretch, over all the speech that will be processed. Silence is skipped, so it is
-            // not counted.
-            var work = regions.Where(r => r.Length >= rate / 4).ToList();
-            double total = Math.Max(1, work.Sum(r => (double)r.Length));
-            double done = 0, current = 0;
+            // Progress = audio already finished + whisper.cpp's own percentage for the current
+            // stretch, over the whole recording.
+            double total = Math.Max(1, reader.TotalSamples);
+            double position = windowStart, current = 0;
             int lastReported = -1;
             void Report(double fraction)
             {
@@ -133,32 +175,77 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
 
             if (progress is not null)
             {
-                builder = builder.WithProgressHandler(p => Report((done + (current * p / 100.0)) / total));
+                builder = builder.WithProgressHandler(p => Report((position + (current * p / 100.0)) / total));
             }
 
-            Report(0);
-            var segments = new List<TranscriptSegment>();
+            Report(windowStart / total);
+            int windowSamples = (int)Math.Max(rate * 30, WindowLength.TotalSeconds * rate);
+            var buffer = new float[windowSamples + (rate * 60)];
+            int carried = 0;
+            int regionCount = 0;
             await using (var processor = builder.Build())
             {
-                foreach (var region in work)
+                while (true)
                 {
-                    current = region.Length;
-
-                    var offset = region.Start(rate);
-                    var chunk = new ReadOnlyMemory<float>(samples, region.StartSample, region.Length);
-                    // ProcessAsync runs whisper.cpp on a worker thread and yields segments as they finish.
-                    await foreach (var segment in processor.ProcessAsync(chunk, cancellationToken).ConfigureAwait(false))
+                    int read = await Task.Run(() => reader.Read(buffer.AsSpan(carried, windowSamples)), cancellationToken).ConfigureAwait(false);
+                    int length = carried + read;
+                    if (length == 0)
                     {
-                        string text = CleanSegment(segment.Text);
-                        if (text.Length > 0 && !IsHintEcho(text, hint))
-                        {
-                            segments.Add(new TranscriptSegment(segment.Start + offset, segment.End + offset, text));
-                        }
+                        break;
                     }
 
-                    done += region.Length;
+                    bool last = read < windowSamples;
+                    var window = new ReadOnlyMemory<float>(buffer, 0, length);
+                    var found = SpeechActivity.Detect(window.Span, rate);
+
+                    // Speech that runs into the end of the window is not cut: it moves to the next
+                    // window (at most a minute of it; longer speech is cut), so no word is split at a boundary.
+                    int cut = length;
+                    if (!last && found.Count > 0 && found[^1].EndSample >= length - (rate / 2) && found[^1].StartSample >= length - (rate * 60))
+                    {
+                        cut = found[^1].StartSample;
+                    }
+
+                    var done = found.Where(r => r.EndSample <= cut).ToList();
+                    var regions = Options.SkipSilence ? SpeechActivity.GroupIntoChunks(done, rate) : [new SpeechRegion(0, cut)];
+                    var offsetOfWindow = TimeSpan.FromSeconds(windowStart / (double)rate);
+                    foreach (var region in regions.Where(r => r.Length >= rate / 4))
+                    {
+                        position = windowStart + region.StartSample;
+                        current = region.Length;
+                        var offset = offsetOfWindow + region.Start(rate);
+                        // ProcessAsync runs whisper.cpp on a worker thread and yields segments as they finish.
+                        await foreach (var segment in processor.ProcessAsync(window.Slice(region.StartSample, region.Length), cancellationToken).ConfigureAwait(false))
+                        {
+                            string text = CleanSegment(segment.Text);
+                            if (text.Length > 0 && !IsHintEcho(text, hint))
+                            {
+                                segments.Add(new TranscriptSegment(segment.Start + offset, segment.End + offset, text));
+                            }
+                        }
+
+                        regionCount++;
+                    }
+
+                    speech.AddRange(done.Select(r => new SpeechRegion((int)(r.StartSample + windowStart), (int)(r.EndSample + windowStart))));
+                    windowStart += cut;
+                    position = windowStart;
                     current = 0;
-                    Report(done / total);
+
+                    // This window is final: saved so a failure or cancel later does not repeat it.
+                    checkpoint.ProcessedSamples = windowStart;
+                    checkpoint.Segments = segments.Select(x => new CheckpointSegment { StartMs = (long)x.Start.TotalMilliseconds, EndMs = (long)x.End.TotalMilliseconds, Text = x.Text }).ToList();
+                    checkpoint.Speech = speech.Select(r => new[] { r.StartSample, r.EndSample }).ToList();
+                    checkpoint.TrySave(checkpointPath);
+                    Report(windowStart / total);
+
+                    // What was not processed (speech running into the boundary) starts the next window.
+                    carried = length - cut;
+                    Array.Copy(buffer, cut, buffer, 0, carried);
+                    if (last && carried == 0)
+                    {
+                        break;
+                    }
                 }
             }
 
@@ -173,9 +260,9 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
             }
 
             LastDiagnostics = new TranscriptionDiagnostics(
-                TimeSpan.FromSeconds((double)samples.Length / rate),
+                TimeSpan.FromSeconds(reader.TotalSamples / (double)rate),
                 TimeSpan.FromSeconds(speech.Sum(r => (double)r.Length) / rate),
-                regions.Count, rawCount, removed, started.Elapsed);
+                regionCount, rawCount, removed, started.Elapsed);
             return new TranscriptionResult(JoinSegments(segments.Select(s => s.Text)), segments);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not TranscriptionException)

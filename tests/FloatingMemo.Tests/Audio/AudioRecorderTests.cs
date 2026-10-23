@@ -88,7 +88,7 @@ public sealed class AudioRecorderTests : IDisposable
 
         var audio = await RecordAsync(recorder, factory, AudioSources.Microphone);
 
-        Assert.Equal(["recording.wav"], Directory.GetFiles(audio.SessionDirectory).Select(Path.GetFileName));
+        Assert.Equal(["recording.wav", RecordingManifest.FileName], Directory.GetFiles(audio.SessionDirectory).Select(Path.GetFileName).Order()); // manifest: names and states only
         audio.Delete();
         Assert.False(Directory.Exists(audio.SessionDirectory));
     }
@@ -249,17 +249,5 @@ public sealed class AudioRecorderTests : IDisposable
         Assert.False(recorder.IsRecording);
         Assert.Empty(Directory.GetDirectories(_dir));
         Assert.True(((SyntheticCaptureStream)factory.Created[0]).Disposed);
-    }
-
-    [Fact]
-    public void DeleteLeftoverRecordings_RemovesOldSessions()
-    {
-        Directory.CreateDirectory(Path.Combine(_dir, "rec-old"));
-        File.WriteAllText(Path.Combine(_dir, "rec-old", "Microphone.wav"), "x");
-        using var recorder = new AudioRecorder(new SyntheticCaptureFactory(), _dir);
-
-        recorder.DeleteLeftoverRecordings();
-
-        Assert.Empty(Directory.GetDirectories(_dir));
     }
 }

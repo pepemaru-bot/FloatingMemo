@@ -28,3 +28,6 @@ body { display: flex; flex-direction: column; }
 .ProseMirror li[data-item-type="task"][data-checked="true"]::before { background: var(--accent); border-color: var(--accent); }
 .ProseMirror li[data-item-type="task"][data-checked="true"] > * { color: var(--done); text-decoration: line-through; }
 .ProseMirror ::selection { background: var(--selection); }
+/* Wrapping off (Alt+Z / settings): long lines scroll sideways instead of wrapping. */
+#visual.nowrap { overflow-x: auto; }
+#visual.nowrap .ProseMirror { white-space: pre; }

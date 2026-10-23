@@ -138,5 +138,36 @@ public static class EvaluationMeetings
             Numbers = ["3月20日", "180"],
         });
 
-    public static readonly EvaluationCase[] All = [Short, Long, Noisy, Switching];
+    /// <summary>
+    /// Decided, decided-not-to, undecided (once garbled as 「見決定」), to be judged later, proposed,
+    /// and two subjects in one sentence: none of the undecided items may become a decision.
+    /// </summary>
+    public static readonly EvaluationCase Decisions = new(
+        "決定状態が紛らわしい会議", "アプリ更新の打ち合わせ（架空）",
+        """
+        # アプリ更新の打ち合わせ（架空）
+        - 参加: 木村、林
+        """,
+        """
+        新バージョンの公開日について話しました。
+        公開日とビスパーのモデル変更については見決定です。
+        アイコンのデザインは青い案に決まりました。
+        説明動画は今回は作らないことに決まりました。
+        ヘルプページの更新は林さんが金曜日までに行います。
+        有料プランを作るかどうかは来月の会議で判断します。
+        価格は月額三百円にしてはどうかという提案がありました。
+        アイコンの色は決まりましたが、形はまだ決まっていません。
+        最後に確認ですが、公開日はまだ決まっていません。
+        """,
+        [],
+        new ExpectedMinutes
+        {
+            Topics = [["公開日"], ["アイコン"], ["動画"], ["ヘルプ"], ["有料"], ["価格"]],
+            Decisions = [["アイコン", "青"], ["動画", "作らない"]],
+            Tasks = [("ヘルプ", "林", "金曜")],
+            NotDecided = ["公開日", "モデル変更", "有料", "300", "形"],
+            Numbers = ["300"],
+        });
+
+    public static readonly EvaluationCase[] All = [Short, Long, Noisy, Switching, Decisions];
 }

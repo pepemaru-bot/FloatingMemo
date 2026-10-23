@@ -64,7 +64,7 @@ html, body {
 }
 
 .cm-content {
-  padding: 4px 10px 24px 10px;
+  padding: 4px 10px 24px 24px; /* room on the left for the list drag handles */
   caret-color: var(--caret);
   tab-size: 4;
 }
@@ -188,3 +188,14 @@ html, body {
 .cm-scroller::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
 .cm-scroller:hover::-webkit-scrollbar-thumb { background: var(--faint); }
 .cm-scroller::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* Moving list items: a handle left of each item (shown while the line is hovered) and the drop line. */
+.cm-scroller { position: relative; }
+.cm-editor .cm-content { padding-left: 24px; } /* beats CodeMirror's own padding: room for the handles */
+.cm-listItemLine { position: relative; }
+.cm-drag-handle { position: absolute; left: -18px; top: 0; width: 14px; text-align: center; cursor: grab; opacity: 0;
+  color: var(--muted); user-select: none; font-size: 0.85em; transition: opacity .12s; }
+.cm-listItemLine:hover .cm-drag-handle, .cm-dragging-item .cm-drag-handle { opacity: 0.75; }
+.cm-dragging-item, .cm-dragging-item * { cursor: grabbing !important; }
+.cm-drop-indicator { position: absolute; display: none; right: 10px; height: 2px; border-radius: 1px; background: var(--accent);
+  pointer-events: none; z-index: 5; }

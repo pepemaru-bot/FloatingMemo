@@ -1,6 +1,6 @@
 ﻿param([string]$NotesDir, [string]$Speech, [string]$LongSpeech, [string]$Project = (Join-Path $PSScriptRoot '..\..\src\FloatingMemo\FloatingMemo.csproj'))
 . (Join-Path $PSScriptRoot 'e2e-lib.ps1')
-$recordings = Join-Path $env:TEMP 'FloatingMemo\recordings'
+$recordings = Join-Path (Split-Path $NotesDir) 'recordings' # the test folder (--recordings-dir)
 function Sessions { if (Test-Path $recordings) { @(Get-ChildItem $recordings -Directory -Filter 'rec-*') } else { @() } }
 function WaitIdle($sec = 120) {
   $deadline = (Get-Date).AddSeconds($sec)
@@ -9,6 +9,9 @@ function WaitIdle($sec = 120) {
 }
 function StatusText { $e = Find "RecordingStatusText"; if ($e) { $e.Current.Name } else { "" } }
 try {
+  # Test recordings only (--recordings-dir): each suite starts with none.
+  $testRecordings = Join-Path (Split-Path $NotesDir) 'recordings'
+  if (Test-Path $testRecordings) { Remove-Item $testRecordings -Recurse -Force }
   if (Test-Path $NotesDir) { Remove-Item $NotesDir -Recurse -Force }
 
   # --- 1. Record -> local Whisper -> appended at the end under the header -> autosaved ---
@@ -76,7 +79,10 @@ try {
   Check "retry button offered" ((Find "文字起こしを再試行" -ByName) -ne $null)
   CloseWindow
   Check "exit with pending audio closes normally" (WaitExit)
-  Check "pending audio deleted on exit" ((Sessions).Count -eq 0)
+  # Audio waiting for a retry is kept (not deleted on exit) and offered at the next start.
+  Check "pending audio kept on exit for the next start" ((Sessions).Count -eq 1)
+  $kept = (Get-Content (Join-Path (Sessions)[0].FullName 'session.json') -Raw -Encoding UTF8 | ConvertFrom-Json).State
+  Check "kept audio marked for a retry" ($kept -eq 'kept') $kept
 }
 catch { "ERROR: $_" }
 finally {

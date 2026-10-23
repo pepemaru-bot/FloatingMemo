@@ -52,6 +52,9 @@ public sealed record MinutesDraft(string Markdown, IReadOnlyList<string> Warning
 
     /// <summary>The checked facts the draft was written from (fact-first layout only).</summary>
     public IReadOnlyList<Fact>? Facts { get; init; }
+
+    /// <summary>Fact-first layouts: what happened to each fact, stage by stage (in memory only).</summary>
+    public MinutesTrace? Trace { get; init; }
 }
 
 /// <summary>
@@ -187,6 +190,7 @@ public sealed partial class MinutesGenerator
         // A note without a transcript block is all notes: its facts are marked as taken from them.
         var units = SourceUnits.From(NoteSections.Split(input));
         var byId = units.ToDictionary(u => u.Id);
+        var trace = new MinutesTrace();
         // Parts are measured with the model's tokenizer when it has one (an estimate otherwise).
         Func<string, int> tokens = text => model.CountTokens(text) ?? FactMinutes.EstimateTokens(text);
         var parts = FactMinutes.Group(units, tokens);
@@ -204,21 +208,72 @@ public sealed partial class MinutesGenerator
         var facts = new List<Fact>();
         int malformed = 0;
         var firstPass = System.Diagnostics.Stopwatch.StartNew();
+        int continuations = 0;
         for (int i = 0; i < parts.Count; i++)
         {
             int part = i;
             progress?.Report(new MinutesProgress("議事録を作成", part + 1, parts.Count, 0, false));
             var generated = progress is null ? null : new SynchronousProgress<int>(n =>
                 progress.Report(new MinutesProgress("議事録を作成", part + 1, parts.Count, Math.Max(0, n), n < 0)));
-            string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.User(FactMinutes.ContextBefore(parts, i), parts[i], i, parts.Count),
-                FactPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
-            var allowed = parts[i].Select(u => u.Id).ToHashSet();
-            facts.AddRange(FactMinutes.Parse(answer, out int bad).Where(f => Keep(f, allowed)).Select(f => FactMinutes.Check(f, byId, allowed)));
-            malformed += bad;
+
+            // When a part is dense (every sentence a fact), the answer can reach its length limit
+            // and stop: the facts of the rest of the part would be lost. Then only the sentences
+            // after the last one the answer used are asked about again (a few times at most).
+            IReadOnlyList<SourceUnit> context = FactMinutes.ContextBefore(parts, i);
+            var pending = parts[i].ToList();
+            for (int round = 0; pending.Count > 0 && round <= FactMinutes.MaxContinuations; round++)
+            {
+                string answer = await model.CompleteAsync(FactPrompt.System,
+                    round == 0 ? FactPrompt.User(context, pending, i, parts.Count) : FactPrompt.Continue(context, pending),
+                    FactPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
+                var allowed = pending.Select(u => u.Id).ToHashSet();
+                var parsed = FactMinutes.Parse(answer, out int bad);
+                facts.AddRange(Accept(parsed, allowed, round == 0 ? "extract" : "continue"));
+                malformed += bad;
+                if (model.LastFinish != MinutesFinish.MaxTokens)
+                {
+                    break;
+                }
+
+                int last = pending.FindLastIndex(u => parsed.Any(f => f.Sources.Contains(u.Id)));
+                if (last < 0 || last >= pending.Count - 1)
+                {
+                    break;
+                }
+
+                context = pending.Take(last + 1).Where(u => !u.IsNoise).TakeLast(2).ToList();
+                pending = pending.Skip(last + 1).ToList();
+                continuations++;
+            }
         }
 
-        // Facts only from the parts' context lines, or only from "次に予算です"-like remarks, are dropped.
-        bool Keep(Fact f, ISet<string> allowed) => !FactMinutes.OnlyContext(f, allowed, byId) && !FactMinutes.OnlyProcedural(f, byId);
+
+        // Facts only from the parts' context lines, or only from "次に予算です"-like remarks, are
+        // dropped; every step is written to the trace.
+        IEnumerable<Fact> Accept(IEnumerable<Fact> parsed, ISet<string> allowed, string pass)
+        {
+            var kept = new List<Fact>();
+            foreach (var f in parsed)
+            {
+                trace.Add($"{pass}-parsed", f);
+                if (FactMinutes.OnlyContext(f, allowed, byId))
+                {
+                    trace.Add($"{pass}-dropped", f, "参照用の文脈だけが根拠");
+                }
+                else if (FactMinutes.OnlyProcedural(f, byId))
+                {
+                    trace.Add($"{pass}-dropped", f, "進行だけの発言");
+                }
+                else
+                {
+                    var checkedFact = FactMinutes.Check(f, byId, allowed);
+                    trace.Add($"{pass}-kept", checkedFact, checkedFact.Issues.Count == 0 ? string.Empty : string.Join("／", checkedFact.Issues));
+                    kept.Add(checkedFact);
+                }
+            }
+
+            return kept;
+        }
 
         // Recovery: statements no fact uses are extracted again, several ranges per request.
         // Speed (CPU by default): only what minutes must not lose (tasks with owner and deadline,
@@ -226,7 +281,10 @@ public sealed partial class MinutesGenerator
         // first pass's time. Quality: every important cue, up to 8 ranges, half the time (at
         // least a minute). What still has no fact is reported below.
         bool speed = priority == MinutesPriority.Speed || (priority == MinutesPriority.Auto && model.UsesGpu != true);
-        var recovery = FactMinutes.RecoveryRanges(units, facts, criticalOnly: speed);
+        // Partly used sentences are shown with only the words no fact covers yet.
+        var uncovered = FactMinutes.UncoveredClauses(units, facts, speed);
+        var recovery = FactMinutes.RecoveryRanges(units, facts, criticalOnly: speed)
+            .Select(r => r.Select(u => uncovered.TryGetValue(u.Id, out string? words) ? u with { Text = words } : u).ToList()).ToList();
         var recoveryBatches = FactMinutes.RecoveryBatches(units, recovery.Take(FactMinutes.MaxRecoveryRanges).ToList(), tokens);
         if (speed && recoveryBatches.Count > 1)
         {
@@ -241,10 +299,15 @@ public sealed partial class MinutesGenerator
         for (int b = 0; b < recoveryBatches.Count && (b == 0 || recoveryClock.Elapsed < limit); b++)
         {
             progress?.Report(new MinutesProgress("議事録を作成", b + 1, recoveryBatches.Count, 0, false));
+            foreach (var unit in recoveryBatches[b].SelectMany(r => r.Range))
+            {
+                trace.Items.Add(new MinutesTrace.Item("recover-request", unit.Id, string.Empty, unit.Text, unit.Id, string.Empty));
+            }
+
             string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.Recovery(recoveryBatches[b]),
                 FactPrompt.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
             var allowed = recoveryBatches[b].SelectMany(r => r.Range).Select(u => u.Id).ToHashSet();
-            var found = FactMinutes.Parse(answer, out int bad).Where(f => Keep(f, allowed)).Select(f => FactMinutes.Check(f, byId, allowed)).ToList();
+            var found = Accept(FactMinutes.Parse(answer, out int bad), allowed, "recover").ToList();
             recovered += found.Count;
             sent += recoveryBatches[b].Count;
             facts.AddRange(found);
@@ -253,8 +316,18 @@ public sealed partial class MinutesGenerator
 
         // A task that says who and when but not what gets its object from the statement before it
         // (cited too), or is marked 要確認.
-        facts = facts.Select(f => FactMinutes.Clarify(f, units)).ToList();
-        run.InputMode = $"facts {(speed ? "speed" : "quality")} recover={sent}/{recovery.Count} requests={recoveryBatches.Count} found={recovered}";
+        var everything = units.Select(u => u.Id).ToHashSet();
+        facts = facts.Select(f =>
+        {
+            var clarified = FactMinutes.Clarify(f, units);
+            // Completed facts are checked again (their text and sources changed).
+            return ReferenceEquals(clarified, f) || clarified.Text == f.Text ? clarified : FactMinutes.Check(clarified, byId, everything);
+        }).ToList();
+
+        // The same subject across the whole meeting: a decision that a later statement calls
+        // undecided is not shown as 【決定】.
+        facts = facts.Select(f => FactMinutes.CrossCheck(f, units)).ToList();
+        run.InputMode = $"facts {(speed ? "speed" : "quality")} recover={sent}/{recovery.Count} requests={recoveryBatches.Count} found={recovered} continuations={continuations}";
         var warnings = new List<string>();
         if (malformed > 0)
         {
@@ -268,6 +341,8 @@ public sealed partial class MinutesGenerator
 
         facts = facts.Select((f, i) => f with { Id = $"F{i + 1:000}" }).ToList(); // the ledger's ids, in the order found
         var topics = FactMinutes.Merge(facts);
+        trace.Add("final", facts);
+        trace.Add("merged", topics.SelectMany(t => t.Facts));
         var uncited = FactMinutes.Uncited(units, facts);
         var importantLeft = FactMinutes.Uncited(units.Where(u => FactMinutes.IsImportant(u.Text)).ToList(), facts);
         if (importantLeft.Count > 0)
@@ -312,7 +387,8 @@ public sealed partial class MinutesGenerator
 
         string body = template is null
             ? FactMinutes.Render(topics, byId, [], warnings, paragraphs, covered)
-            : await RenderTemplateAsync(template, topics, byId, model, warnings, run, progress, cancellationToken).ConfigureAwait(false);
+            : await RenderTemplateAsync(template, topics, byId, model, warnings, run, progress, cancellationToken, trace).ConfigureAwait(false);
+        run.Stages = trace.Counts();
         body += FactMinutes.SourceAppendix(units, uncited);
         if (correction is not null)
         {
@@ -324,6 +400,7 @@ public sealed partial class MinutesGenerator
             Correction = correction,
             Run = run,
             Facts = facts,
+            Trace = trace,
         };
     }
 }
@@ -333,7 +410,7 @@ public sealed partial class MinutesGenerator
     /// <summary>A user template filled from the fact ledger (see <see cref="TemplateFacts"/>).</summary>
     private static async Task<string> RenderTemplateAsync(MinutesTemplate template, List<(string Topic, List<Fact> Facts)> topics,
         IReadOnlyDictionary<string, SourceUnit> units, ILocalTextGenerator model, List<string> warnings, MinutesRun run,
-        IProgress<MinutesProgress>? progress, CancellationToken cancellationToken)
+        IProgress<MinutesProgress>? progress, CancellationToken cancellationToken, MinutesTrace trace)
     {
         var facts = topics.SelectMany(t => t.Facts).ToList();
         var numbered = template.Sections.Select((s, i) => (Number: i + 1, Section: s)).ToList();
@@ -341,23 +418,43 @@ public sealed partial class MinutesGenerator
         var ruled = numbered.Select(x => TemplateFacts.SlotOf(x.Section)).ToHashSet();
         bool HasRule(Fact f) => (f.Kind == FactKind.Decision && ruled.Contains(TemplateFacts.Slot.Decisions))
             || (f.Kind == FactKind.Task && ruled.Contains(TemplateFacts.Slot.Tasks))
-            || (f.Kind is FactKind.Open or FactKind.Question && ruled.Contains(TemplateFacts.Slot.Open));
+            || (f.Kind is FactKind.Open or FactKind.Question or FactKind.Unclear && ruled.Contains(TemplateFacts.Slot.Open));
 
-        // The model only chooses a heading number for facts no heading claims by kind.
+        // A heading whose name the fact itself uses ("会場" in "会場は市民ホールに決まりました") takes it
+        // without asking the model; the model only chooses for the rest.
         var assignments = new Dictionary<string, int>();
         var open = facts.Where(f => !HasRule(f)).ToList();
-        if (byModel.Count > 0 && open.Count > 0)
+        foreach (var fact in open)
+        {
+            if (TemplateFacts.NamedHeading(fact, byModel) is { } named)
+            {
+                assignments[fact.Id] = named;
+            }
+        }
+
+        var unnamed = open.Where(f => !assignments.ContainsKey(f.Id)).ToList();
+        if (byModel.Count > 0 && unnamed.Count > 0)
         {
             var ids = facts.Select(f => f.Id).ToHashSet();
             var numbers = byModel.Select(x => x.Number).ToHashSet();
-            foreach (var batch in open.Chunk(40))
+            // Small models skip lines in long lists: those they left out are asked about once more.
+            foreach (var attempt in new[] { 30, 15 })
             {
-                progress?.Report(new MinutesProgress("議事録を作成", 1, 1, 0, false));
-                string answer = await model.CompleteAsync(TemplateFacts.AssignSystem, TemplateFacts.AssignUser(byModel, batch),
-                    TemplateFacts.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
-                foreach (var (id, n) in TemplateFacts.ParseAssignments(answer, ids, numbers))
+                var ask = unnamed.Where(f => !assignments.ContainsKey(f.Id)).ToList();
+                foreach (var batch in ask.Chunk(attempt))
                 {
-                    assignments[id] = n;
+                    progress?.Report(new MinutesProgress("議事録を作成", 1, 1, 0, false));
+                    string answer = await model.CompleteAsync(TemplateFacts.AssignSystem, TemplateFacts.AssignUser(byModel, batch),
+                        TemplateFacts.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
+                    foreach (var (id, n) in TemplateFacts.ParseAssignments(answer, ids, numbers))
+                    {
+                        assignments.TryAdd(id, n);
+                    }
+                }
+
+                if (unnamed.All(f => assignments.ContainsKey(f.Id)))
+                {
+                    break;
                 }
             }
         }
@@ -391,6 +488,12 @@ public sealed partial class MinutesGenerator
         }
 
         run.InputMode += $" template={template.Id} assigned={assignments.Count(a => a.Value > 0)}/{open.Count}";
+        foreach (var fact in open)
+        {
+            int n = assignments.GetValueOrDefault(fact.Id, -1);
+            trace.Add("assign", fact, n < 0 ? "割り当てなし（AIの回答になし）" : n == 0 ? "合う見出しなし" : numbered.First(x => x.Number == n).Section.Title);
+        }
+
         return TemplateFacts.Render(template, facts, units, assignments, drafts, topics.Select(t => t.Topic).ToList(), warnings);
     }
 }

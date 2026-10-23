@@ -71,6 +71,8 @@ $suites = [ordered]@{
     'export'        = @()
     'templates'     = @()
     'visual'        = @()
+    'recovery'      = @('-Speech', $speech)
+    'editorux'      = @()
     'integration'   = @('-LongSpeech', $long)
 }
 

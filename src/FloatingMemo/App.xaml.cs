@@ -90,13 +90,14 @@ public partial class App : Application
         // Nothing is recorded until the user presses the record button. Listing devices and
         // watching for changes does not open any device.
         var (devices, captureFactory) = CreateAudioDevices(() => preferences.Microphone);
-        var recorder = new AudioRecorder(captureFactory, AudioRecorder.DefaultWorkDirectory);
-        recorder.DeleteLeftoverRecordings();
+        // "--recordings-dir <folder>" isolates tests from the real temporary recordings.
+        var recorder = new AudioRecorder(captureFactory, GetArgument("--recordings-dir") ?? AudioRecorder.DefaultWorkDirectory);
+        // Recordings left by an earlier run are not deleted here: the memo asks the user (recover or delete).
 
         // The model is not loaded here: it loads on the first transcription so start-up stays fast.
         // "--model <file>" selects another GGML model (e.g. ggml-small.bin for better accuracy).
         var transcriber = new LocalWhisperTranscriptionService(
-            GetArgument("--model") ?? LocalWhisperTranscriptionService.DefaultModelPath, language: "ja");
+            GetArgument("--model") ?? LocalWhisperTranscriptionService.ResolveModelPath(preferences.WhisperModel), language: "ja");
 
         // The user's own term dictionary (empty until the user imports or adds terms), stored
         // next to the notes. Whisper gets only the few words the user marked as hints.

@@ -223,6 +223,7 @@
     <Page.KeyboardAccelerators>
         <!-- Ctrl+R starts/stops recording without leaving the keyboard. -->
         <KeyboardAccelerator Key="R" Modifiers="Control" Invoked="OnRecordAcceleratorInvoked" />
+        <KeyboardAccelerator Key="Z" Modifiers="Menu" Invoked="OnWrapAcceleratorInvoked" />
         <!-- Note/tab commands (see OnNoteCommand). -->
         <KeyboardAccelerator Key="N" Modifiers="Control" Invoked="OnNoteCommand" />
         <KeyboardAccelerator Key="W" Modifiers="Control" Invoked="OnNoteCommand" />
@@ -486,10 +487,22 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- AI minutes (local LLM): create from the open transcript, or switch between the two. -->
+            <!-- Link (Ctrl+K) and AI minutes (local LLM). -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+            <Button
+                x:Name="LinkButton"
+                Width="34"
+                Height="32"
+                Padding="0"
+                AllowFocusOnInteraction="False"
+                AutomationProperties.AutomationId="LinkButton"
+                AutomationProperties.Name="リンクを挿入"
+                Click="OnLinkClick"
+                ToolTipService.ToolTip="リンクを挿入・編集 (Ctrl+K)">
+                <FontIcon FontSize="14" Glyph="&#xE71B;" />
+            </Button>
             <Button
                 x:Name="MinutesButton"
-                Grid.Column="1"
                 Width="34"
                 Height="32"
                 Padding="0"
@@ -502,6 +515,7 @@
                     <MenuFlyout x:Name="MinutesMenu" Opening="OnMinutesMenuOpening" Placement="TopEdgeAlignedRight" />
                 </Button.Flyout>
             </Button>
+            </StackPanel>
 
             <!--
                 Left side of the control strip: recording / transcription status, and next to it

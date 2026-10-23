@@ -40,10 +40,17 @@ public sealed class TemplateFactsTests
 
         public string ModelName => "テスト用モデル";
 
+        // Answers by kind of request (extraction, heading assignment, anything else), each once:
+        // re-reading and retries get nothing, so the script does not depend on how many there are.
+        private readonly HashSet<string> _answered = [];
+
         public Task<string> CompleteAsync(string system, string user, int maxTokens, CancellationToken cancellationToken, IProgress<int>? progress = null)
         {
             Calls.Add((system, user));
-            return Task.FromResult(_next < answers.Length ? answers[_next++] : string.Empty);
+            string kind = system == FactPrompt.System ? "facts" : system == TemplateFacts.AssignSystem ? "assign" : "other";
+            int index = kind switch { "facts" => 0, "assign" => 1, _ => 2 };
+            _ = _next;
+            return Task.FromResult(_answered.Add(kind) && index < answers.Length ? answers[index] : string.Empty);
         }
     }
 
@@ -89,7 +96,7 @@ public sealed class TemplateFactsTests
     [Fact]
     public void TheSmallModel_KeepsTheFormerTemplatePath()
     {
-        var model = new Scripted("## 決定事項\n- 【決定】リリース日は十一月一日（原文:「リリース日は十一月一日に決まりました」）");
+        var model = new Scripted(string.Empty, string.Empty, "## 決定事項\n- 【決定】リリース日は十一月一日（原文:「リリース日は十一月一日に決まりました」）");
         var draft = new MinutesGenerator(model, MinutesStyle.FixedSections, Template).GenerateAsync(Note, "定例", new DateTime(2026, 10, 17)).Result;
         Assert.DoesNotContain(model.Calls, c => c.System == FactPrompt.System);
         Assert.Contains("## 決定事項", draft.Markdown);

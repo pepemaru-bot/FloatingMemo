@@ -7,11 +7,12 @@
 // Talks to the C# host through window.chrome.webview messages only (see handleHost()).
 // No network, no eval, no innerHTML.
 
-import { EditorState, EditorSelection, Compartment, Prec } from './vendor/codemirror-state/dist/index.js';
+import { EditorState, EditorSelection, Compartment, Prec, StateField, StateEffect } from './vendor/codemirror-state/dist/index.js';
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, drawSelection, placeholder } from './vendor/codemirror-view/dist/index.js';
 import { history, historyKeymap, defaultKeymap, indentMore, indentLess, insertTab } from './vendor/codemirror-commands/dist/index.js';
 import { syntaxTree, indentUnit } from './vendor/codemirror-language/dist/index.js';
 import { markdown, markdownLanguage, insertNewlineContinueMarkup } from './vendor/codemirror-lang-markdown/dist/index.js';
+import { listDrag, listItems, moveSpec } from './listdrag.js';
 
 const host = window.chrome && window.chrome.webview;
 const post = (message) => { if (host) host.postMessage(message); };
@@ -323,6 +324,185 @@ function command(name) {
   };
 }
 
+// ----- Brackets: typing an opening bracket adds its closing one -----------------------------
+// Only pairs the editor inserted itself are treated as pairs: typing the closing bracket steps
+// over it, Backspace between them deletes both. A closing bracket that was already in the note
+// is never removed. Brackets confirmed with the Japanese IME get the same treatment once the
+// composition has ended (never while composing, so nothing is inserted twice).
+const PAIRS = { '(': ')', '[': ']', '{': '}', '「': '」', '『': '』', '（': '）', '【': '】', '〈': '〉', '《': '》' };
+const CLOSERS = new Set(Object.values(PAIRS));
+const addPair = StateEffect.define({ map: (pos, change) => change.mapPos(pos) });
+const dropPair = StateEffect.define({ map: (pos, change) => change.mapPos(pos) });
+// Positions of closing brackets the editor inserted (mapped through every edit).
+const autoPairs = StateField.define({
+  create: () => [],
+  update(pairs, tr) {
+    let next = tr.docChanged ? pairs.map((p) => tr.changes.mapPos(p, 1)) : pairs;
+    for (const e of tr.effects) {
+      if (e.is(addPair)) next = [...next, e.value];
+      if (e.is(dropPair)) next = next.filter((p) => p !== e.value);
+    }
+    // A pair whose closing bracket was deleted or typed over is forgotten.
+    return next.filter((p) => p < tr.state.doc.length && CLOSERS.has(tr.state.doc.sliceString(p, p + 1)));
+  },
+});
+
+// Letters, digits, kana and kanji right after the cursor: no closing bracket (it would get in the way).
+const WORD_AFTER = /[\p{L}\p{N}]/u;
+
+function charAt(state, pos) { return pos >= 0 && pos < state.doc.length ? state.doc.sliceString(pos, pos + 1) : ''; }
+
+const bracketInput = EditorView.inputHandler.of((view, from, to, text) => {
+  if (view.composing || view.compositionStarted || view.state.readOnly) return false;
+  const { state } = view;
+  if (PAIRS[text] && state.selection.ranges.length === 1) {
+    const close = PAIRS[text];
+    if (from !== to) {
+      // Selected text is wrapped; the text stays selected.
+      view.dispatch({
+        changes: [{ from, insert: text }, { from: to, insert: close }],
+        selection: EditorSelection.range(from + 1, to + 1),
+        userEvent: 'input.type',
+      });
+      return true;
+    }
+    if (WORD_AFTER.test(charAt(state, from))) return false;
+    view.dispatch({
+      changes: { from, insert: text + close },
+      selection: EditorSelection.cursor(from + 1),
+      effects: addPair.of(from + 1),
+      userEvent: 'input.type',
+    });
+    return true;
+  }
+  if (CLOSERS.has(text) && from === to && charAt(state, from) === text && state.field(autoPairs).includes(from)) {
+    // Typing the closing bracket the editor added: step over it instead of adding another.
+    view.dispatch({ selection: EditorSelection.cursor(from + 1), effects: dropPair.of(from), userEvent: 'select' });
+    return true;
+  }
+  return false;
+});
+
+function deleteAutoPair(view) {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty || view.composing) return false;
+  const pos = sel.head;
+  const open = charAt(state, pos - 1);
+  if (PAIRS[open] && charAt(state, pos) === PAIRS[open] && state.field(autoPairs).includes(pos)) {
+    view.dispatch({ changes: { from: pos - 1, to: pos + 1 }, userEvent: 'delete.backward' });
+    return true;
+  }
+  return false;
+}
+
+// After the IME confirmed a single bracket: add the closing one, or step over an added one.
+function afterImeBracket(committed) {
+  if (typeof committed !== 'string' || committed.length !== 1 || view.state.readOnly) return;
+  const { state } = view;
+  const sel = state.selection.main;
+  if (!sel.empty) return;
+  const pos = sel.head;
+  if (PAIRS[committed] && charAt(state, pos - 1) === committed && charAt(state, pos) !== PAIRS[committed] && !WORD_AFTER.test(charAt(state, pos))) {
+    view.dispatch({ changes: { from: pos, insert: PAIRS[committed] }, selection: EditorSelection.cursor(pos), effects: addPair.of(pos), userEvent: 'input.type' });
+  } else if (CLOSERS.has(committed) && charAt(state, pos - 1) === committed && charAt(state, pos) === committed && state.field(autoPairs).includes(pos)) {
+    view.dispatch({ changes: { from: pos, to: pos + 1 }, userEvent: 'input.type' });
+  }
+}
+
+// ----- Links: [text](url) ----------------------------------------------------------------
+const SAFE_URL = /^(https?:\/\/[^\s<>"]+|mailto:[^\s<>"]+)$/i;
+const LINK = /\[([^\]\n]*)\]\(([^)\s]*)\)/g;
+let pendingLink = null;   // what Ctrl+K asked the host about: { id, from, to, existing }
+
+// The Markdown link around a position, if any.
+function linkAt(state, pos) {
+  const line = state.doc.lineAt(pos);
+  for (const m of line.text.matchAll(LINK)) {
+    const from = line.from + m.index, to = from + m[0].length;
+    if (pos >= from && pos <= to) return { from, to, text: m[1], url: m[2] };
+  }
+  return null;
+}
+
+function requestLink(view) {
+  if (view.composing || view.state.readOnly || currentId === null) return false;
+  const sel = view.state.selection.main;
+  const existing = linkAt(view.state, sel.head);
+  if (existing && (sel.empty || (sel.from >= existing.from && sel.to <= existing.to))) {
+    pendingLink = { id: currentId, from: existing.from, to: existing.to, existing: true };
+    post({ type: 'linkRequest', text: existing.text, url: existing.url, existing: true });
+  } else {
+    const text = view.state.sliceDoc(sel.from, sel.to);
+    if (text.includes('\n')) return true; // one line only
+    pendingLink = { id: currentId, from: sel.from, to: sel.to, existing: false };
+    post({ type: 'linkRequest', text, url: '', existing: false });
+  }
+  return true;
+}
+
+// Brackets and spaces in a URL would end the Markdown link early.
+const linkUrl = (url) => url.replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
+
+function applyLink(text, url) {
+  const p = pendingLink;
+  pendingLink = null;
+  if (!p || p.id !== currentId || p.to > view.state.doc.length) return;
+  let insert;
+  if (url === '') {
+    if (!p.existing) return;
+    insert = text; // link removed: the words stay
+  } else {
+    if (!SAFE_URL.test(url)) return;
+    insert = `[${(text || url).replace(/[\[\]]/g, '')}](${linkUrl(url)})`;
+  }
+  view.dispatch({
+    changes: { from: p.from, to: p.to, insert },
+    selection: EditorSelection.cursor(p.from + insert.length),
+    userEvent: 'input.link',
+  });
+  view.focus();
+}
+
+// Pasting a URL over selected words makes them a link (one step, undoable).
+// Runs before the Markdown package's own paste-as-link, which also links text that is not a
+// valid address (e.g. with spaces): such text is pasted as plain text instead.
+const linkPaste = Prec.highest(EditorView.domEventHandlers({
+  paste(event, view) {
+    const url = (event.clipboardData && event.clipboardData.getData('text/plain') || '').trim();
+    const sel = view.state.selection.main;
+    if (view.composing || sel.empty) return false;
+    if (!SAFE_URL.test(url)) {
+      if (!/^(https?:|mailto:)/i.test(url)) return false;
+      event.preventDefault();
+      view.dispatch(view.state.replaceSelection(url), { userEvent: 'input.paste' });
+      return true;
+    }
+    const text = view.state.sliceDoc(sel.from, sel.to);
+    if (text.includes('\n') || /^\s*$/.test(text)) return false;
+    event.preventDefault();
+    const insert = `[${text.replace(/[\[\]]/g, '')}](${linkUrl(url)})`;
+    view.dispatch({ changes: { from: sel.from, to: sel.to, insert }, selection: EditorSelection.cursor(sel.from + insert.length), userEvent: 'input.paste' });
+    return true;
+  },
+  // Ctrl+click on a link asks the host to open it (after showing the address). A plain click
+  // only moves the cursor, so editing never opens a browser by accident.
+  mousedown(event, view) {
+    if (!event.ctrlKey || event.button !== 0) return false;
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    const link = pos === null ? null : linkAt(view.state, pos);
+    if (!link || !SAFE_URL.test(link.url)) return false;
+    event.preventDefault();
+    post({ type: 'openLink', url: link.url });
+    return true;
+  },
+}));
+
+// ----- Line wrapping (display only: the note's text is never changed) ------------------------
+const wrapping = new Compartment();
+let wrapOn = true;
+const wrapExtension = () => (wrapOn ? EditorView.lineWrapping : []);
+
 const appKeymap = Prec.highest(keymap.of([
   { key: 'Escape', run: command('hide') },
   { key: 'Mod-n', run: command('new') },
@@ -336,6 +516,8 @@ const appKeymap = Prec.highest(keymap.of([
   { key: 'Mod-Shift-t', run: command('reopen') },
   { key: 'F2', run: command('rename') },
   { key: 'F6', run: command('focusOut') },
+  { key: 'Mod-k', run: requestLink },
+  { key: 'Backspace', run: deleteAutoPair },
   { key: 'Mod-b', run: toggleWrap('**') },
   { key: 'Mod-i', run: toggleWrap('*') },
   { key: 'Tab', run: smartTab, shift: smartShiftTab },
@@ -357,7 +539,11 @@ function createState(text, caret, isReadOnly) {
       appKeymap,
       history(),
       drawSelection(),
-      EditorView.lineWrapping,
+      wrapping.of(wrapExtension()),
+      autoPairs,
+      bracketInput,
+      listDrag,
+      linkPaste,
       indentUnit.of('\t'),
       markdown({ base: markdownLanguage }),   // GFM: tasks, strikethrough, tables, autolinks
       keymap.of([...historyKeymap, ...defaultKeymap]),
@@ -400,6 +586,7 @@ function load(id, text, caret, isReadOnly) {
   }
   currentId = id;
   view.setState(state);
+  view.dispatch({ effects: wrapping.reconfigure(wrapExtension()) }); // a kept state may have the other setting
   view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
 }
 
@@ -429,8 +616,10 @@ function insertTranscriptNow(block) {
 }
 
 view.contentDOM.addEventListener('compositionstart', () => post({ type: 'composition', active: true }));
-view.contentDOM.addEventListener('compositionend', () => {
+view.contentDOM.addEventListener('compositionend', (e) => {
   compositionEndedAt = performance.now();
+  const committed = e.data;
+  setTimeout(() => afterImeBracket(committed), 0);
   post({ type: 'composition', active: false });
   if (pendingInsert !== null) {
     const text = pendingInsert;
@@ -443,6 +632,15 @@ view.contentDOM.addEventListener('compositionend', () => {
 // back into the editor. A focus request from the host can arrive before the page actually
 // has focus, in which case view.focus() alone would do nothing.
 window.addEventListener('focus', () => { if (!view.hasFocus) view.focus(); });
+
+// Alt+Z (wrap on/off) by key position: with Alt held, the key value depends on the layout and IME.
+document.addEventListener('keydown', (e) => {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyZ' && !view.composing) {
+    e.preventDefault();
+    e.stopPropagation();
+    post({ type: 'command', name: 'wrap' });
+  }
+}, true);
 
 // Links are styled only: never navigate (the host blocks navigation as well).
 document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('a')) e.preventDefault(); }, true);
@@ -475,6 +673,22 @@ function handleHost(message) {
     case 'focus':
       view.focus();
       break;
+    case 'options':
+      if (typeof message.wrap === 'boolean' && message.wrap !== wrapOn) {
+        wrapOn = message.wrap;
+        view.dispatch({ effects: wrapping.reconfigure(wrapExtension()) });
+      }
+      break;
+    case 'link':
+      requestLink(view);
+      break;
+    case 'applyLink':
+      if (typeof message.url === 'string' && message.url.length <= 2048 && typeof message.text === 'string' && message.text.length <= 1000) {
+        applyLink(message.text, message.url);
+      } else {
+        pendingLink = null;
+      }
+      break;
     case 'theme':
       if (message.theme === 'light' || message.theme === 'dark') document.documentElement.dataset.theme = message.theme;
       else delete document.documentElement.dataset.theme;
@@ -503,7 +717,7 @@ if (host) {
   host.addEventListener('message', (e) => handleHost(e.data));
 } else {
   // Opened in a normal browser for development (no app host): expose a handle for testing.
-  window.floatingMemoDebug = { view, load, handleHost };
+  window.floatingMemoDebug = { view, load, handleHost, listItems, moveSpec };
 }
 // Tells the host which cursor colour is in effect (only a colour value; used by tests).
 function reportCaret() {

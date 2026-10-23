@@ -50,9 +50,23 @@ public static partial class TemplateFacts
     {
         Slot.Decisions => fact.Kind == FactKind.Decision,
         Slot.Tasks => fact.Kind == FactKind.Task,
-        Slot.Open => fact.Kind is FactKind.Open or FactKind.Question,
+        Slot.Open => fact.Kind is FactKind.Open or FactKind.Question or FactKind.Unclear,
         _ => false,
     };
+
+    /// <summary>
+    /// The heading whose name the fact uses (its text or topic), when exactly one does: "会場",
+    /// "予算", "次回会議"…. Words in parentheses ("ToDo（担当・期限）") are not part of the name.
+    /// </summary>
+    public static int? NamedHeading(Fact fact, IReadOnlyList<(int Number, TemplateSection Section)> headings)
+    {
+        string said = MinutesValidator.Normalize(fact.Topic + " " + fact.Text);
+        var hits = headings.Where(h => h.Section.Kind != TemplateRules.Draft)
+            .Select(h => (h.Number, Name: MinutesValidator.Normalize(System.Text.RegularExpressions.Regex.Replace(h.Section.Title, "[（(].*$", string.Empty))))
+            .Where(h => h.Name.Length >= 2 && said.Contains(h.Name, StringComparison.Ordinal))
+            .Select(h => h.Number).Distinct().ToList();
+        return hits.Count == 1 ? hits[0] : null;
+    }
 
     public static string AssignSystem { get; } = """
         あなたは議事録の整理係です。番号付きの事実を、最も合う見出しの番号に割り当ててください。
@@ -188,7 +202,7 @@ public static partial class TemplateFacts
 
             foreach (var fact in list)
             {
-                sb.Append(FactMinutes.Line(fact, units)).Append('\n');
+                sb.Append(FactMinutes.LineWithTopic(fact, units, section.Title)).Append('\n');
                 if (fact.Issues.Count > 0)
                 {
                     warnings.Add($"{section.Title}: {string.Join("／", fact.Issues)}");
@@ -205,7 +219,7 @@ public static partial class TemplateFacts
             sb.Append("## その他（テンプレートの見出しに当てはまらない内容）\n");
             foreach (var fact in rest)
             {
-                sb.Append(FactMinutes.Line(fact, units)).Append('\n');
+                sb.Append(FactMinutes.LineWithTopic(fact, units, string.Empty)).Append('\n');
             }
         }
 

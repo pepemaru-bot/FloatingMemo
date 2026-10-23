@@ -177,6 +177,7 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             if (Str(message, "type") == "ready")
             {
                 PostTheme();
+                Post(new JsonObject { ["type"] = "options", ["wrap"] = _wrap });
 
                 ready.TrySetResult();
                 return;
@@ -187,7 +188,34 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     }
 
     private static readonly HashSet<string> Commands =
-        ["hide", "new", "open", "export", "close", "save", "next", "previous", "reopen", "rename", "record", "focusOut"];
+        ["hide", "new", "open", "export", "close", "save", "next", "previous", "reopen", "rename", "record", "focusOut", "wrap"];
+
+    /// <summary>Ctrl+K: the page asks for a link address (text = selected words, url = the existing link's).</summary>
+    public event EventHandler<(string Text, string Url, bool Existing)>? LinkRequested;
+
+    /// <summary>Ctrl+click on a link: the page asks to open this address (http, https or mailto only).</summary>
+    public event EventHandler<string>? OpenLinkRequested;
+
+    private bool _wrap = true;
+
+    /// <summary>Long lines wrap at the window edge (true) or scroll sideways (false). Display only.</summary>
+    public void SetWrap(bool wrap)
+    {
+        _wrap = wrap;
+        Post(new JsonObject { ["type"] = "options", ["wrap"] = wrap });
+    }
+
+    /// <summary>The link button: same as Ctrl+K in the page.</summary>
+    public void RequestLink() => Post(new JsonObject { ["type"] = "link" });
+
+    /// <summary>Answers a link request: an empty url removes an existing link and keeps its words.</summary>
+    public void ApplyLink(string text, string url) => Post(new JsonObject { ["type"] = "applyLink", ["text"] = text, ["url"] = url });
+
+    /// <summary>Addresses that may become links or be opened: web pages and e-mail only.</summary>
+    public static bool IsSafeUrl(string? url) =>
+        url is { Length: > 0 and <= 2048 } && !url.Any(char.IsWhiteSpace)
+        && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" or "mailto"
+        && (uri.Scheme == "mailto" || !string.IsNullOrEmpty(uri.Host));
 
     // Last text reported by the page; caret-only messages carry no text.
     private string _lastText = string.Empty;
@@ -246,6 +274,17 @@ internal sealed class WebMarkdownEditor : IMemoEditor
                 break;
             case "focus":
                 FocusChanged?.Invoke(this, message["focused"]?.GetValueKind() == JsonValueKind.True);
+                break;
+            case "linkRequest":
+                LinkRequested?.Invoke(this, (Str(message, "text") is { Length: <= 1000 } t ? t : string.Empty,
+                    Str(message, "url") is { Length: <= 2048 } u ? u : string.Empty, message["existing"]?.GetValueKind() == JsonValueKind.True));
+                break;
+            case "openLink":
+                if (Str(message, "url") is { } link && IsSafeUrl(link))
+                {
+                    OpenLinkRequested?.Invoke(this, link);
+                }
+
                 break;
             case "command":
                 if (Str(message, "name") is { } name && Commands.Contains(name))

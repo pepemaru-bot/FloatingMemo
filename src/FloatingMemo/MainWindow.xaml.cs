@@ -38,6 +38,13 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         _services = services;
         _hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        // Hover-only tooltips compare the pointer with the control's place in this window.
+        Controls.HoverToolTips.ClientOrigin = _ =>
+        {
+            var origin = new NativeMethods.POINT();
+            NativeMethods.ClientToScreen(_hwnd, ref origin);
+            return (origin.X, origin.Y);
+        };
 
         // Absolute path: the portable build may be started from any working directory.
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
@@ -58,6 +65,10 @@ public sealed partial class MainWindow : Window
         Activated += (_, args) =>
         {
             bool active = args.WindowActivationState != WindowActivationState.Deactivated;
+            if (!active)
+            {
+                Controls.HoverToolTips.CloseAll();
+            }
             MemoPage?.SetWindowActive(active);
             if (active)
             {

@@ -51,6 +51,9 @@ public sealed class MinutesRun
     /// <summary>How the input was laid out for the model (e.g. notes and transcript apart).</summary>
     public string InputMode { get; set; } = string.Empty;
 
+    /// <summary>Facts per pipeline stage ("extract-parsed=24 extract-kept=22 …"): counts only.</summary>
+    public string Stages { get; set; } = string.Empty;
+
     /// <summary>[start, end) of each part in the text that was split.</summary>
     public List<(int Start, int End)> Ranges { get; } = [];
 
@@ -95,7 +98,7 @@ public sealed class MinutesRun
     public string Format(DateTime when) => string.Create(CultureInfo.InvariantCulture,
         $"{when:yyyy-MM-ddTHH:mm:ss} note={Input.NoteId} input={Input.Hash} chars={Input.TotalCharacters} " +
         $"human={Input.HumanCharacters} transcript={Input.TranscriptCharacters} blocks={Input.TranscriptBlocks} " +
-        $"model={Model} style={Style} mode={InputMode} {Settings} parts={Ranges.Count} " +
+        $"model={Model} style={Style} mode={InputMode} {Settings} stages=[{Stages}] parts={Ranges.Count} " +
         $"ranges={string.Join(",", Ranges.Select(r => $"{r.Start}-{r.End}"))} " +
         $"unprocessed={(Unprocessed.Count == 0 ? "none" : string.Join(",", Unprocessed.Select(r => $"{r.Start}-{r.End}")))} " +
         $"calls={string.Join(";", Calls.Select(c => $"{c.Step}#{c.Part}:in={c.InputCharacters},out={c.OutputCharacters},{c.Finish},{c.Elapsed.TotalSeconds:F1}s"))}");

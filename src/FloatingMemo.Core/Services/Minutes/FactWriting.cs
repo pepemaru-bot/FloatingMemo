@@ -122,7 +122,7 @@ public static partial class FactWriting
                 }
 
                 string carried = string.Join("。", facts.Select(f => $"{f.Condition} {f.Text} {f.Who} {f.Due}"));
-                string kind = facts.Any(f => f.Kind == FactKind.Open) ? FactKind.Open : facts[0].Kind;
+                string kind = facts.Any(f => f.Kind == FactKind.Unclear) ? FactKind.Unclear : facts.Any(f => f.Kind == FactKind.Open) ? FactKind.Open : facts[0].Kind;
                 var evidence = FactEvidence.Check(plain, carried, kind);
                 if (evidence.Level == Support.Unsupported || evidence.Problems.Any(p => !p.StartsWith("根拠の原文は内容の一部", StringComparison.Ordinal)))
                 {

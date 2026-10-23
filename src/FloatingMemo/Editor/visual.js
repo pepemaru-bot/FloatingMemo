@@ -182,6 +182,7 @@ const commands = [
 document.addEventListener('keydown', (e) => {
   if (composing || e.isComposing) return;
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (e.altKey && !e.ctrlKey && e.code === 'KeyZ') { e.preventDefault(); post({ type: 'command', name: 'wrap' }); return; }
   const hit = commands.find(([k, ctrl, shift]) => k === key && ctrl === e.ctrlKey && shift === e.shiftKey && !e.altKey);
   if (hit) {
     e.preventDefault();
@@ -228,6 +229,10 @@ function handleHost(message) {
       if (!isText(message.text)) break;
       if (message.id === currentId) insert(message.text);
       else post({ type: 'insertRejected', id: message.id, text: message.text });
+      break;
+    case 'options':
+      // Wrapping is display only: off = long lines keep their breaks and scroll sideways.
+      if (typeof message.wrap === 'boolean') { visual.classList.toggle('nowrap', !message.wrap); source.wrap = message.wrap ? 'soft' : 'off'; }
       break;
     case 'focus':
       focusEditor();

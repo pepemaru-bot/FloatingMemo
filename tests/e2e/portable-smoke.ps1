@@ -9,13 +9,14 @@
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tests\e2e\portable-smoke.ps1 -Exe C:\Temp\FloatingMemo-Portable\FloatingMemo.exe
 #>
-param([string]$Exe, [string]$NotesDir = (Join-Path $env:TEMP 'FloatingMemoE2E\portable-notes'), [switch]$WithModels)
+param([string]$Exe, [string]$NotesDir = (Join-Path $env:TEMP 'FloatingMemoE2E\portable-notes'), [switch]$WithModels, [string]$UserModels = '')
 $Project = ''
 . (Join-Path $PSScriptRoot 'e2e-lib.ps1')
 $env:FM_EXE = $Exe
 $emptyModels = Join-Path $env:TEMP 'FloatingMemoE2E\no-user-models'
 New-Item -ItemType Directory -Force $emptyModels | Out-Null
-$env:FLOATINGMEMO_MODELS_DIR = $emptyModels
+# -UserModels <folder>: the app-only package with models already on the PC (read only).
+$env:FLOATINGMEMO_MODELS_DIR = if ($UserModels) { $UserModels } else { $emptyModels }
 
 if (Get-Process FloatingMemo -ErrorAction SilentlyContinue) { Write-Error "Close Floating Memo first."; exit 2 }
 

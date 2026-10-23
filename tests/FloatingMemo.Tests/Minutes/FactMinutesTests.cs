@@ -131,7 +131,7 @@ public sealed class FactMinutesTests
         Assert.Equal(2, model.Prompts.Count);
         Assert.Contains("議事録にまだ入っていない", model.Prompts[1]);
         Assert.Contains("B006 広報のブログを", model.Prompts[1]);
-        Assert.DoesNotContain("B002 リリース日", model.Prompts[1]); // only the missing range
+        Assert.DoesNotContain("\nB002 リリース日", model.Prompts[1]); // only the missing range (B002 may be context)
         Assert.Contains(draft.Facts!, f => f.Sources.Contains("B006") && f.Kind == FactKind.Proposal);
         Assert.DoesNotContain(draft.Warnings, w => w.Contains("B006"));
         Assert.Matches("found=1", draft.Run!.InputMode);
@@ -246,7 +246,7 @@ public sealed class FactMinutesTests
     }
 
     [Fact]
-    public void AWrongCitation_IsKept_AndFlagged_WithTheOneFullMatchAsASuggestion()
+    public void ANearbyDriftedCitation_IsMovedOnlyWhenTheFactPassesEveryCheckAgain()
     {
         var units = new[]
         {
@@ -256,15 +256,22 @@ public sealed class FactMinutesTests
         }.ToDictionary(u => u.Id);
         var allowed = new HashSet<string>(units.Keys);
         var fact = FactMinutes.Check(new Fact(FactKind.Info, "アンケート", "回答は百二十件ありました", ["B003"], "", ""), units, allowed);
-        Assert.Equal(["B003"], fact.Sources);                 // never moved automatically
-        Assert.False(fact.Verified);
-        Assert.Contains("候補: B001", fact.Issues);
-        Assert.Contains(fact.Issues, i => i.Contains("内容を示していない"));
+        Assert.Equal(["B001"], fact.Sources);                 // the one sentence that carries it, two lines away
+        Assert.Equal("B003", fact.RecitedFrom);               // the model's number is kept for the trace
+        Assert.Equal(Support.Supported, fact.Support);
+        Assert.Empty(fact.Issues);
 
-        // No clear match: the citation stays and is flagged.
+        // No sentence carries it: the citation stays and is flagged.
         var unclear = FactMinutes.Check(new Fact(FactKind.Info, "x", "会場は第三会議室", ["B002"], "", ""), units, allowed);
         Assert.Equal(["B002"], unclear.Sources);
+        Assert.Null(unclear.RecitedFrom);
         Assert.NotEmpty(unclear.Issues);
+
+        // Too far away (more than MaxCitationDrift sentences): not moved, only suggested.
+        var many = Enumerable.Range(1, 30).Select(i => new SourceUnit($"B{i:000}", i == 1 ? "回答は百二十件ありました。" : $"別の話題その{i}です。", false)).ToDictionary(u => u.Id);
+        var far = FactMinutes.Check(new Fact(FactKind.Info, "アンケート", "回答は百二十件ありました", ["B030"], "", ""), many, new HashSet<string>(many.Keys));
+        Assert.Equal(["B030"], far.Sources);
+        Assert.Contains("候補: B001", far.Issues);
     }
 
     [Fact]
@@ -340,7 +347,7 @@ public sealed class FactMinutesTests
     {
         // B006 (a proposal) is not critical: on a CPU (Auto) it is reported, not extracted again.
         var (auto, autoModel) = Run(Note, Answer);
-        Assert.Single(autoModel.Prompts);
+        Assert.DoesNotContain(autoModel.Prompts.Skip(1), p => p.Contains("B006 広報")); // re-reading (if any) leaves it out
         Assert.Contains("speed", auto.Run!.InputMode);
         Assert.Contains(auto.Warnings, w => w.Contains("B006"));
 

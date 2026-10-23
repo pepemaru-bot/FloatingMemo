@@ -57,7 +57,8 @@ function Launch([switch]$Build, [string[]]$Extra = @(), [switch]$NoDraft) {
   else { Remove-Item (Join-Path (Split-Path $NotesDir) 'e2e-settings.json') -ErrorAction SilentlyContinue }
   # Like an upgrade from the single-memo version: an (empty) draft.md opens as the first tab.
   if (-not $NoDraft -and -not (Test-Path (Join-Path $NotesDir 'draft.md'))) { New-Item -ItemType Directory -Force $NotesDir | Out-Null; [IO.File]::WriteAllText((Join-Path $NotesDir 'draft.md'), '') }
-  $a += @('--', '--notes-dir', $NotesDir, '--settings-file', (Join-Path (Split-Path $NotesDir) 'e2e-settings.json')) + $Extra
+  # Test recordings never go to (or are looked for in) the real recordings folder in %TEMP%.
+  $a += @('--', '--notes-dir', $NotesDir, '--settings-file', (Join-Path (Split-Path $NotesDir) 'e2e-settings.json'), '--recordings-dir', (Join-Path (Split-Path $NotesDir) 'recordings')) + $Extra
   if ($env:FM_EXE) {
     # Test a published build (e.g. the portable folder) directly instead of `dotnet run`.
     $appArgs = $a[([array]::IndexOf($a, '--') + 1)..($a.Length - 1)]

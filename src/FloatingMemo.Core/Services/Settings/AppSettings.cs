@@ -22,6 +22,9 @@ public sealed class AppSettings
     /// <summary>File name of the Qwen model for AI minutes (null = the best one available).</summary>
     public string? MinutesModel { get; set; }
 
+    /// <summary>Long lines wrap at the window edge (default) or keep their line breaks and scroll sideways. Display only.</summary>
+    public bool WrapLines { get; set; } = true;
+
     /// <summary>Experimental visual (WYSIWYG) editing instead of the Markdown source editor (applies after a restart).</summary>
     public bool VisualEditor { get; set; }
 
@@ -39,6 +42,9 @@ public sealed class AppSettings
 
     /// <summary>GPU use for Whisper and Qwen (applies after a restart).</summary>
     public FloatingMemo.Services.Acceleration.AccelerationMode Acceleration { get; set; } = FloatingMemo.Services.Acceleration.AccelerationMode.Auto;
+
+    /// <summary>Whisper model file name (e.g. ggml-small.bin); null = the first installed (base before small). Applies after a restart.</summary>
+    public string? WhisperModel { get; set; }
 
     /// <summary>AI minutes: Auto (speed on a CPU, quality on a GPU), Speed or Quality.</summary>
     public FloatingMemo.Services.Minutes.MinutesPriority MinutesPriority { get; set; } = FloatingMemo.Services.Minutes.MinutesPriority.Auto;

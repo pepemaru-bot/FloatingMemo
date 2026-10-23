@@ -106,6 +106,13 @@ public static class FactKind
     public const string Task = "作業";
     public const string Open = "未決";
 
+    /// <summary>
+    /// Set by the checks, never by the model: the cited words do not show reliably whether it was
+    /// decided (garbled "見決定", tentative "仮決定", weak evidence, conflicting statements).
+    /// Shown as 【要確認】, never as 【決定】.
+    /// </summary>
+    public const string Unclear = "要確認";
+
     public static readonly string[] All = [Info, Opinion, Question, Proposal, Decision, Task, Open];
 
     public static string Normalize(string? kind) => kind?.Trim() switch
@@ -142,6 +149,9 @@ public sealed record Fact(string Kind, string Topic, string Text, IReadOnlyList<
     /// <summary>F001…: given in the order facts are found (for the ledger and the writing step).</summary>
     public string Id { get; init; } = string.Empty;
 
+    /// <summary>The model's own source numbers when the check moved the citation to the sentence that carries the fact.</summary>
+    public string? RecitedFrom { get; init; }
+
     /// <summary>A condition the fact holds under ("雨の場合" …), as the model reported it.</summary>
     public string Condition { get; init; } = string.Empty;
 
@@ -175,6 +185,23 @@ public static class FactPrompt
         8. あいさつ・相づち・音声や画面の確認、「次に予算です」のような進行だけの発言は抜き出さない。
         9. JSON の行以外は何も書かない。
         """;
+
+    /// <summary>The rest of a part after an answer that stopped at its length limit.</summary>
+    public static string Continue(IReadOnlyList<SourceUnit> context, IReadOnlyList<SourceUnit> units)
+    {
+        var sb = new StringBuilder("前の回答は途中で終わりました。続きの発言から、事実を抜き出してください（前の発言の事実は書かない）。\n<原文>\n");
+        foreach (var unit in context)
+        {
+            sb.Append("【文脈】").Append(unit.Id).Append(' ').Append(unit.Text).Append('\n');
+        }
+
+        foreach (var unit in units.Where(u => !u.IsNoise))
+        {
+            sb.Append(unit.Id).Append(' ').Append(unit.Text).Append('\n');
+        }
+
+        return sb.Append("</原文>\n/no_think").ToString();
+    }
 
     /// <summary>Several recovery ranges in one request (see FactMinutes.RecoveryBatches).</summary>
     public static string Recovery(IReadOnlyList<(IReadOnlyList<SourceUnit> Context, IReadOnlyList<SourceUnit> Range)> ranges)
@@ -427,7 +454,41 @@ public static partial class FactMinutes
     /// units of another part), assignees and deadlines must be in them, numbers must be in
     /// them, and a decision must be said to be decided.
     /// </summary>
+    /// <summary>
+    /// Small models often cite a sentence a few lines away from the one they used (the numbers
+    /// drift in long parts). If the cited sentence does not carry the fact but exactly one
+    /// sentence near it fully does, the fact is checked again against that sentence — all the
+    /// checks, not just the words — and kept with it only if it now passes them all. The
+    /// original numbers are kept in <see cref="Fact.RecitedFrom"/> (trace). Nothing else is ever
+    /// re-cited: a citation that no nearby sentence explains stays, with its warning.
+    /// </summary>
     public static Fact Check(Fact fact, IReadOnlyDictionary<string, SourceUnit> units, ISet<string> allowed)
+    {
+        var result = CheckCited(fact, units, allowed);
+        if (result.Support is null or Minutes.Support.Supported || fact.Sources.Count == 0)
+        {
+            return result;
+        }
+
+        string claimed = fact.Condition.Length > 0 ? fact.Condition + " " + fact.Text : fact.Text;
+        var order = units.Keys.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => x.i);
+        string? candidate = FactEvidence.Candidate(claimed, fact.Kind, allowed.Where(units.ContainsKey).Select(id => units[id]));
+        if (candidate is null || fact.Sources.Contains(candidate) || !order.TryGetValue(candidate, out int at)
+            || !fact.Sources.Any(s => order.TryGetValue(s, out int cited) && Math.Abs(cited - at) <= MaxCitationDrift))
+        {
+            return result;
+        }
+
+        var recited = CheckCited(fact with { Sources = [candidate] }, units, allowed);
+        return recited.Support == Minutes.Support.Supported && recited.Issues.Count == 0
+            ? recited with { RecitedFrom = string.Join(",", fact.Sources) }
+            : result;
+    }
+
+    /// <summary>How far (in sentences) a citation may be from the sentence it really meant.</summary>
+    public const int MaxCitationDrift = 12;
+
+    private static Fact CheckCited(Fact fact, IReadOnlyDictionary<string, SourceUnit> units, ISet<string> allowed)
     {
         string whole = string.Concat(units.Values.Select(u => u.Text));
         // Citations are never changed here: a wrong number stays visible with a warning.
@@ -455,29 +516,53 @@ public static partial class FactMinutes
             due = string.Empty;
         }
 
+        // The decision state is read from the cited words (the clause the fact is about), not
+        // taken from the kind the model chose: "未決定です" contains 決定, "見決定" is garbled.
         string kind = fact.Kind;
+        var state = valid.Count > 0 ? DecisionStatus.ForFact(fact.Text, cited) : DecisionState.None;
         if (kind == FactKind.Decision && valid.Count > 0)
         {
-            if (OpenCue().IsMatch(cited) && !DecisionCue().IsMatch(cited))
+            kind = state switch
             {
-                kind = FactKind.Open; // said to be undecided: not a decision
-            }
-            else if (!DecisionCue().IsMatch(cited))
+                DecisionState.Confirmed or DecisionState.ConfirmedNegative => FactKind.Decision,
+                DecisionState.Open or DecisionState.Future => FactKind.Open,
+                DecisionState.Proposal => FactKind.Proposal,
+                DecisionState.Unclear => FactKind.Unclear,
+                // Not said to be decided ("…話しましょう", "…と思います"): not shown as a decision.
+                _ => Proposal().IsMatch(cited) ? FactKind.Open : Opinion().IsMatch(cited) ? FactKind.Opinion : FactKind.Info,
+            };
+            if (state == DecisionState.Unclear)
             {
-                // Not said to be decided ("…の予定です", "…話しましょう"): not shown as a decision.
-                kind = Proposal().IsMatch(cited) ? FactKind.Open : Opinion().IsMatch(cited) ? FactKind.Opinion : FactKind.Info;
+                issues.Add("決定したかどうか原文からは判断できない（聞き取りの誤りや暫定の可能性）");
             }
         }
 
+        // A decision not to do something must say so: "花火は上げない" — not "花火を上げる".
+        if (kind == FactKind.Decision && state == DecisionState.ConfirmedNegative && !Negation().IsMatch(fact.Text) && !NegativeContent().IsMatch(fact.Text))
+        {
+            kind = FactKind.Unclear;
+            issues.Add("原文は「しないこと」の決定だが、内容に否定がない");
+        }
+
         // Said to be undecided, whatever kind the model chose (提案 / 情報): an open question.
-        if (kind is FactKind.Info or FactKind.Proposal or FactKind.Opinion && valid.Count > 0 && Undecided().IsMatch(cited))
+        if (kind is FactKind.Info or FactKind.Proposal or FactKind.Opinion && valid.Count > 0 && (state == DecisionState.Open || Undecided().IsMatch(cited)))
         {
             kind = FactKind.Open;
         }
 
+        // Said to be decided ("次回の定例会は十一月十四日に決まりました") but given a weaker kind by
+        // the model: a decision. Only from the clause the fact is about, and the evidence check
+        // below still turns a weakly supported one into 【要確認】.
+        if (kind is FactKind.Info or FactKind.Proposal && valid.Count > 0 && state is DecisionState.Confirmed or DecisionState.ConfirmedNegative)
+        {
+            kind = FactKind.Decision;
+        }
+
         // "森さんが来週の水曜日までに作ることになりました" is a task, whatever kind the model chose:
-        // assignee and deadline are taken from the cited words themselves.
-        if (kind is not FactKind.Task and not FactKind.Open and not FactKind.Question && valid.Count > 0
+        // assignee and deadline are taken from the cited words themselves. Not when the words say
+        // it is undecided or unclear ("森さんが来週までに作るかは未定").
+        if (kind is not FactKind.Task and not FactKind.Open and not FactKind.Question and not FactKind.Unclear && valid.Count > 0
+            && state is not (DecisionState.Open or DecisionState.Future or DecisionState.Unclear)
             && TaskOwner().Match(cited) is { Success: true } owner && TaskDue().Match(cited) is { Success: true } deadline)
         {
             kind = FactKind.Task;
@@ -504,8 +589,88 @@ public static partial class FactMinutes
             }
         }
 
+        // A decision whose cited words do not fully carry it is not shown as 【決定】 with a
+        // warning: it is shown as 【要確認】 (the reasons stay in the warning).
+        if (kind == FactKind.Decision && support is Minutes.Support.Partial or Minutes.Support.Unsupported)
+        {
+            kind = FactKind.Unclear;
+        }
+
         return fact with { Sources = valid, Kind = kind, Who = who, Due = due, Issues = issues.Distinct().ToList(), Support = support };
     }
+
+    /// <summary>
+    /// Compares a decision with everything else said about the same subject in the meeting: if a
+    /// later statement about it says it is not decided (or is unclear), the decision is shown as
+    /// 【要確認】 and names that statement. An earlier "まだ決まっていない" is normal (decided later).
+    /// An open item that a later statement seems to decide keeps 【未決】 with a note.
+    /// </summary>
+    public static Fact CrossCheck(Fact fact, IReadOnlyList<SourceUnit> units)
+    {
+        if (fact.Kind is not (FactKind.Decision or FactKind.Open) || fact.Sources.Count == 0)
+        {
+            return fact;
+        }
+
+        string subject = Subject(fact.Topic);
+        if (subject.Length < 2)
+        {
+            return fact;
+        }
+
+        int last = units.Select((u, i) => (u, i)).Where(x => fact.Sources.Contains(x.u.Id)).Select(x => x.i).DefaultIfEmpty(-1).Max();
+        if (last < 0)
+        {
+            return fact;
+        }
+
+        foreach (var unit in units.Skip(last + 1).Where(u => !u.IsNoise && MentionsAlone(MinutesValidator.Normalize(u.Text), subject)))
+        {
+            var state = DecisionStatus.ForFact(fact.Text, unit.Text);
+            if (fact.Kind == FactKind.Decision && state is DecisionState.Open or DecisionState.Unclear or DecisionState.Future)
+            {
+                return fact with { Kind = FactKind.Unclear, Issues = [.. fact.Issues, $"後の発言 {unit.Id} では「{subject}」は未決"] };
+            }
+
+            if (fact.Kind == FactKind.Open && state is DecisionState.Confirmed or DecisionState.ConfirmedNegative)
+            {
+                return fact with { Issues = [.. fact.Issues, $"後の発言 {unit.Id} で決まった可能性"] };
+            }
+        }
+
+        return fact;
+    }
+
+    /// <summary>
+    /// The subject as a word of its own: "会議" in "次回の会議は" but not in "定例会議" (another
+    /// subject that happens to end with the same word).
+    /// </summary>
+    private static bool MentionsAlone(string text, string subject)
+    {
+        for (int at = text.IndexOf(subject, StringComparison.Ordinal); at >= 0; at = text.IndexOf(subject, at + 1, StringComparison.Ordinal))
+        {
+            char before = at > 0 ? text[at - 1] : ' ';
+            bool compound = char.IsLetterOrDigit(before) && !(before is >= 'ぁ' and <= 'ゖ'); // kanji, katakana, latin before it
+            if (!compound)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>"公開日の変更" → "公開日": what a topic is about (the part before "の", or the whole name).</summary>
+    private static string Subject(string topic)
+    {
+        string t = MinutesValidator.Normalize(topic);
+        int of = t.IndexOf('の');
+        string subject = of >= 2 ? t[..of] : t;
+        return subject is "その他" or "全体" or "概要" ? string.Empty : subject;
+    }
+
+    [GeneratedRegex("見送|中止|取りやめ|取り止め|やめ|なし|しない|行わない|不要|廃止")]
+    private static partial Regex NegativeContent();
 
     /// <summary>
     /// Merges the facts of all parts: topics with the same or a similar name become one; a fact
@@ -541,11 +706,14 @@ public static partial class FactMinutes
             if (twin >= 0)
             {
                 var kept = list[twin];
+                // One statement read as decided and as undecided (or unclear): never resolved in
+                // favour of 【決定】 — it is shown as 【要確認】 with both readings named.
+                bool split = Conflicting(kept.Kind, fact.Kind);
                 list[twin] = kept with
                 {
-                    Kind = Specific(kept.Kind) >= Specific(fact.Kind) ? kept.Kind : fact.Kind,
+                    Kind = split ? FactKind.Unclear : Specific(kept.Kind) >= Specific(fact.Kind) ? kept.Kind : fact.Kind,
                     Sources = kept.Sources.Concat(fact.Sources).Distinct().ToList(),
-                    Issues = kept.Issues.Concat(fact.Issues).Distinct().ToList(),
+                    Issues = kept.Issues.Concat(fact.Issues).Concat(split ? ["決定か未決か判定が分かれた"] : []).Distinct().ToList(),
                 };
                 continue;
             }
@@ -625,9 +793,13 @@ public static partial class FactMinutes
     public static bool OnlyContext(Fact fact, ISet<string> allowed, IReadOnlyDictionary<string, SourceUnit> units) =>
         fact.Sources.Count > 0 && !fact.Sources.Any(allowed.Contains) && fact.Sources.All(units.ContainsKey);
 
+    private static bool Conflicting(string a, string b) =>
+        (a == FactKind.Decision && b is FactKind.Open or FactKind.Unclear) || (b == FactKind.Decision && a is FactKind.Open or FactKind.Unclear);
+
     /// <summary>Which kind wins when one statement was given two kinds.</summary>
     private static int Specific(string kind) => kind switch
     {
+        FactKind.Unclear => 7,
         FactKind.Decision => 6,
         FactKind.Task => 5,
         FactKind.Open => 4,
@@ -654,6 +826,9 @@ public static partial class FactMinutes
 
     /// <summary>At most this many ranges are extracted again, …</summary>
     public const int MaxRecoveryRanges = 8;
+
+    /// <summary>How many times one part is continued after an answer that stopped at its length limit.</summary>
+    public const int MaxContinuations = 3;
 
     /// <summary>… and for at most this share of the first pass's time (at least a minute).</summary>
     public const double RecoveryTimeShare = 0.5;
@@ -688,6 +863,63 @@ public static partial class FactMinutes
         return numbers.Count > 0 && numbers.All(stated.Contains) && !BeyondNumbers().IsMatch(text);
     }
 
+    /// <summary>
+    /// Quality priority: any statement with content (not a filler, not "次に予算です", at least a
+    /// short sentence) that no fact uses is read again — not only those with a decision or task cue.
+    /// </summary>
+    public static bool IsContent(string text) =>
+        !SourceUnits.IsNoise(text) && !SourceUnits.IsProcedural(text) && MinutesValidator.Normalize(text).Length >= 10;
+
+    /// <summary>
+    /// Cited sentences with a clause (split at "が、", "けど" …) whose words no fact citing the
+    /// sentence covers: information left in a sentence the model only partly used.
+    /// </summary>
+    public static IEnumerable<string> PartlyUsed(IReadOnlyList<SourceUnit> units, IReadOnlyList<Fact> facts, bool criticalOnly) =>
+        UncoveredClauses(units, facts, criticalOnly).Keys;
+
+    /// <summary>
+    /// The clauses of partly used sentences that no fact covers, by unit id. Re-reading shows the
+    /// model only these words (the unit keeps its number; checks still use the whole sentence),
+    /// otherwise it sees the sentence as already in the minutes.
+    /// </summary>
+    public static Dictionary<string, string> UncoveredClauses(IReadOnlyList<SourceUnit> units, IReadOnlyList<Fact> facts, bool criticalOnly)
+    {
+        var result = new Dictionary<string, string>();
+        var bySource = facts.SelectMany(f => f.Sources.Select(s => (s, f))).GroupBy(x => x.s).ToDictionary(g => g.Key, g => g.Select(x => x.f).ToList());
+        foreach (var unit in units.Where(u => !u.IsNoise && bySource.ContainsKey(u.Id)))
+        {
+            var clauses = DecisionStatus.Clauses(unit.Text);
+            if (clauses.Count < 2)
+            {
+                continue;
+            }
+
+            string covered = MinutesValidator.Normalize(string.Concat(bySource[unit.Id].Select(f => f.Text + f.Condition)));
+            foreach (string clause in clauses)
+            {
+                string c = MinutesValidator.Normalize(clause);
+                if (c.Length < 6 || (criticalOnly && !IsCritical(clause)))
+                {
+                    continue;
+                }
+
+                int bigrams = 0, hits = 0;
+                for (int i = 0; i + 1 < c.Length; i++)
+                {
+                    bigrams++;
+                    hits += covered.Contains(c.Substring(i, 2), StringComparison.Ordinal) ? 1 : 0;
+                }
+
+                if (bigrams > 0 && hits < bigrams * 0.4)
+                {
+                    result[unit.Id] = result.TryGetValue(unit.Id, out string? before) ? before + " " + clause : clause;
+                }
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>A statement that is very likely needed in the minutes (see StrongCue).</summary>
     public static bool IsCritical(string text) => IsImportant(text) && StrongCue().IsMatch(text);
 
@@ -699,13 +931,18 @@ public static partial class FactMinutes
     {
         var factList = facts.ToList();
         var cited = factList.SelectMany(f => f.Sources).ToHashSet();
+        // A cited sentence with a clause no fact covers ("会場は予約できましたが、駐車場はまだ探して
+        //います" → only the 会場 half taken) is read again too.
+        var partly = PartlyUsed(units, factList, criticalOnly).ToHashSet();
         // Numbers the minutes already state: "あ、三日、三日で大丈夫です" only repeats 「十二月三日に決まりました」.
         var stated = factList.SelectMany(f => Digits().Matches(Numerals.Arabic(f.Text)).Select(m => m.Value)).ToHashSet();
         var ranges = new List<List<SourceUnit>>();
         int last = -10;
         for (int i = 0; i < units.Count; i++)
         {
-            if (cited.Contains(units[i].Id) || !(criticalOnly ? IsCritical(units[i].Text) : IsImportant(units[i].Text)) || Repeats(units[i].Text, stated))
+            bool candidate = partly.Contains(units[i].Id)
+                || (!cited.Contains(units[i].Id) && (criticalOnly ? IsCritical(units[i].Text) : IsContent(units[i].Text)) && !Repeats(units[i].Text, stated));
+            if (!candidate)
             {
                 continue;
             }
@@ -740,7 +977,7 @@ public static partial class FactMinutes
         int used = 0;
         foreach (var range in ranges)
         {
-            int first = units.ToList().IndexOf(range[0]);
+            int first = units.ToList().FindIndex(u => u.Id == range[0].Id);
             IReadOnlyList<SourceUnit> context = units.Take(first).Where(u => !u.IsNoise).TakeLast(2).ToList();
             int cost = context.Concat(range).Sum(u => tokens(u.Id + " " + u.Text) + 1);
             if (batches.Count == 0 || used + cost > contentTokens)
@@ -835,6 +1072,7 @@ public static partial class FactMinutes
     {
         [FactKind.Decision] = "【決定】",
         [FactKind.Open] = "【未決】",
+        [FactKind.Unclear] = "【要確認】",
         [FactKind.Proposal] = "【提案】",
         [FactKind.Question] = "【質問】",
         [FactKind.Opinion] = "【意見】",
@@ -888,6 +1126,20 @@ public static partial class FactMinutes
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Under a template heading the topic is not visible any more: "二十人から二十五人に増えた"
+    /// under 準備 does not say it was the number of sign-ups. The fact's own topic is shown
+    /// first when its words are not already in the text (and it is not the heading itself).
+    /// </summary>
+    public static string LineWithTopic(Fact fact, IReadOnlyDictionary<string, SourceUnit> units, string heading)
+    {
+        string topic = fact.Topic.Trim();
+        string text = MinutesValidator.Normalize(fact.Text);
+        bool shown = topic.Length < 2 || topic == "その他" || text.Contains(MinutesValidator.Normalize(topic), StringComparison.Ordinal)
+            || MinutesValidator.Normalize(heading).Contains(MinutesValidator.Normalize(topic), StringComparison.Ordinal);
+        return shown ? Line(fact, units) : Line(fact with { Text = $"{topic}: {fact.Text}" }, units);
     }
 
     /// <summary>One fact as a Markdown line: mark or checkbox, text, source numbers, origin, what to review.</summary>

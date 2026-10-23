@@ -177,6 +177,15 @@ public sealed partial class MainPage : Page
         UpdateSourceIcons();
         _recorder = services.Recorder;
         _recorder.SourceFailed += OnSourceFailed;
+        // Shortcut hints only while the mouse is over their button (never on keyboard focus).
+        foreach (var control in new FrameworkElement[] { NewNoteButton, NoteListButton, LinkButton, MinutesButton, MicToggle, MicDeviceButton, SystemAudioToggle, RecordButton })
+        {
+            HoverToolTips.Adopt(control);
+        }
+
+        MemoTextBox.GotFocus += (_, _) => HoverToolTips.CloseAll();
+        // Recordings left by an earlier run (crash, failed processing): ask, never delete silently.
+        DispatcherQueue.TryEnqueue(OfferLeftoverRecordings);
 
         // Device notifications arrive on a COM thread.
         _devices = services.Devices;
@@ -241,6 +250,13 @@ public sealed partial class MainPage : Page
         bool hadFocus = ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), MemoTextBox);
         _markdownEditor = editor;
         Attach(editor);
+        editor.LinkRequested += (_, request) => DispatcherQueue.TryEnqueue(async () => await AskForLinkAsync(request.Text, request.Url, request.Existing));
+        editor.OpenLinkRequested += (_, url) => DispatcherQueue.TryEnqueue(async () => await ConfirmOpenLinkAsync(url));
+        editor.SetWrap(_services?.Preferences.WrapLines != false);
+        EditorDisplay.WrapChanged += (_, wrap) => DispatcherQueue.TryEnqueue(() => _markdownEditor?.SetWrap(wrap));
+        // Typing or clicking in the memo closes any hover hint (the pointer may have left a
+        // button straight into the editor, which is another window).
+        editor.FocusChanged += (_, focused) => { if (focused) { DispatcherQueue.TryEnqueue(HoverToolTips.CloseAll); } };
         editor.Failed += (_, _) => DispatcherQueue.TryEnqueue(FallBackToPlainEditor);
 #if TEST_HOOKS
         editor.FocusChanged += (_, focused) => DispatcherQueue.TryEnqueue(() => _testEditorFocus = focused);
@@ -311,6 +327,7 @@ public sealed partial class MainPage : Page
     private TextBlock? _testMirrorText;
     private TextBlock? _testMirrorFocus;
     private TextBlock? _testMirrorKind;
+    private TextBlock? _testMirrorTip;
     private TextBlock? _testMirrorLevels;
     private TextBlock? _testMirrorCaret;
     private bool _testEditorFocus;
@@ -329,6 +346,7 @@ public sealed partial class MainPage : Page
         _testMirrorText = Make("EditorMirror");
         _testMirrorFocus = Make("EditorFocusState");
         _testMirrorKind = Make("EditorKind");
+        _testMirrorTip = Make("HoverTipState");
         _testMirrorLevels = Make("LevelMirror");
         _testMirrorCaret = Make("EditorCaret");
 
@@ -382,6 +400,7 @@ public sealed partial class MainPage : Page
         // Same line breaks as the TextBox ("\r") so tests work with either editor.
         AutomationProperties.SetName(_testMirrorText, (_workspace?.Active?.Text ?? string.Empty).Replace('\n', '\r'));
         AutomationProperties.SetName(_testMirrorKind!, web ? (_markdownEditor!.Visual ? "visual" : "web") : "plain");
+        AutomationProperties.SetName(_testMirrorTip!, HoverToolTips.OpenText ?? "none");
         AutomationProperties.SetName(_testMirrorCaret!, _markdownEditor?.CaretColor ?? string.Empty);
         bool focused = web ? _testEditorFocus : XamlRoot is not null && ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), MemoTextBox);
         AutomationProperties.SetName(_testMirrorFocus!, focused ? "focused" : "blurred");
@@ -443,12 +462,24 @@ public sealed partial class MainPage : Page
     /// <summary>Stops any recording/transcription and discards the audio (used when exiting).</summary>
     public void DiscardRecording()
     {
+        // Recording or transcribing: the user confirmed discarding that audio. Audio that was
+        // only waiting for a retry is kept and offered again at the next start.
+        bool discardPending = VoiceState == VoiceState.Transcribing;
         _minutesCts?.Cancel();
         StopMicrophoneTest();
         _recordingClock.Stop();
         _recorder?.Cancel();
         _transcriptionCts?.Cancel();
-        SetPendingAudio(null);
+        if (discardPending)
+        {
+            _pendingAudio?.Delete();
+        }
+        else
+        {
+            _pendingAudio?.Keep();
+        }
+
+        _pendingAudio = null;
         SetVoiceState(VoiceState.Idle);
     }
 
@@ -537,7 +568,7 @@ public sealed partial class MainPage : Page
             Content = new FontIcon { Glyph = "\uE711", FontSize = 9 },
             Tag = noteId,
         };
-        ToolTipService.SetToolTip(close, "タブを閉じる (Ctrl+W)。ノートは削除されません");
+        HoverToolTips.Set(close, "タブを閉じる (Ctrl+W)。ノートは削除されません");
         close.Click += OnTabCloseClick;
 
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -581,7 +612,7 @@ public sealed partial class MainPage : Page
         AutomationProperties.SetName(view.Button, note.Title);
         AutomationProperties.SetItemStatus(view.Button, active ? "選択中" : string.Empty);
         AutomationProperties.SetName(view.Close, $"{note.Title} を閉じる");
-        ToolTipService.SetToolTip(view.Button, $"{note.Title}\n{note.Info.FilePath}\nダブルクリックで名前を変更 (F2)");
+        HoverToolTips.Set(view.Button, $"{note.Title}\n{note.Info.FilePath}\nダブルクリックで名前を変更 (F2)");
     }
 
     private static string TabId(object sender) => (string)((FrameworkElement)sender).Tag;
@@ -962,7 +993,7 @@ public sealed partial class MainPage : Page
         string full = $"AI議事録 工程{stepNumber}/{_minutesSteps}：{step}{parts}・{elapsed}{chars}";
         MinutesStatusText.Text = $"AI議事録 {stepNumber}/{_minutesSteps} {shortStep}{parts} {elapsed}{chars}";
         AutomationProperties.SetName(MinutesStatusText, full);
-        ToolTipService.SetToolTip(MinutesIndicator,
+        HoverToolTips.Set(MinutesIndicator,
             full + "\nAIの処理は進み具合の割合を正確に計算できないため、工程・経過時間・生成した文字数を表示しています。");
     }
 
@@ -1539,7 +1570,7 @@ public sealed partial class MainPage : Page
         AutomationProperties.SetAutomationId(row, "NoteListItem");
         AutomationProperties.SetName(row, entry.Note.Title);
         AutomationProperties.SetHelpText(row, detail);
-        ToolTipService.SetToolTip(row, entry.Note.FilePath);
+        HoverToolTips.Set(row, entry.Note.FilePath);
         return row;
     }
 
@@ -1727,6 +1758,120 @@ public sealed partial class MainPage : Page
                 // F6: leave the editor with the keyboard (Tab inside the editor indents).
                 RecordButton.Focus(FocusState.Keyboard);
                 break;
+            case "wrap":
+                ToggleWrap();
+                break;
+        }
+    }
+
+    // ----- Display: line wrapping (Alt+Z), links (Ctrl+K) -----------------------------------------
+
+    /// <summary>Alt+Z: wrap long lines or let them scroll sideways. Display only; saved in the settings.</summary>
+    private void OnWrapAcceleratorInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        ToggleWrap();
+    }
+
+    // The page and the window can both see one Alt+Z: a second toggle right after the first is the same key press.
+    private DateTime _lastWrapToggle = DateTime.MinValue;
+
+    private void ToggleWrap()
+    {
+        if (_services is null || DateTime.UtcNow - _lastWrapToggle < TimeSpan.FromMilliseconds(400))
+        {
+            return;
+        }
+
+        _lastWrapToggle = DateTime.UtcNow;
+
+        _services.Preferences.WrapLines = !_services.Preferences.WrapLines;
+        _services.Settings.TrySave(_services.Preferences);
+        EditorDisplay.SetWrap(_services.Preferences.WrapLines);
+        ShowStatus(_services.Preferences.WrapLines ? "折り返し: オン（Alt+Z で切り替え）" : "折り返し: オフ・長い行は横にスクロール（Alt+Z で切り替え）");
+    }
+
+    private void OnLinkClick(object sender, RoutedEventArgs e)
+    {
+        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && !_markdownEditor.Visual)
+        {
+            _markdownEditor.RequestLink();
+        }
+        else
+        {
+            ShowStatus("リンクの挿入は Markdown エディタで使えます");
+        }
+    }
+
+    /// <summary>Ctrl+K / the link button: words and address of a link (new or existing).</summary>
+    private async Task AskForLinkAsync(string text, string url, bool existing)
+    {
+        if (_markdownEditor is null || XamlRoot is null)
+        {
+            return;
+        }
+
+        var textBox = new TextBox { Header = "表示する文字", Text = text };
+        AutomationProperties.SetAutomationId(textBox, "LinkTextBox");
+        var urlBox = new TextBox { Header = "リンク先（https://… または mailto:…）", Text = url, PlaceholderText = "https://" };
+        AutomationProperties.SetAutomationId(urlBox, "LinkUrlBox");
+        var error = new TextBlock { Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["SystemFillColorCriticalBrush"], TextWrapping = TextWrapping.Wrap };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = existing ? "リンクを編集" : "リンクを挿入",
+            Content = new StackPanel { Spacing = 8, Children = { textBox, urlBox, error } },
+            PrimaryButtonText = "設定",
+            SecondaryButtonText = existing ? "リンクを解除" : string.Empty,
+            CloseButtonText = "キャンセル",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            if (!WebMarkdownEditor.IsSafeUrl(urlBox.Text.Trim()))
+            {
+                error.Text = "http:// / https:// で始まるアドレス、または mailto: を入力してください。";
+                args.Cancel = true;
+            }
+        };
+        dialog.Opened += (_, _) => (string.IsNullOrEmpty(text) ? textBox : urlBox).Focus(FocusState.Programmatic);
+        var result = await dialog.ShowAsync();
+        switch (result)
+        {
+            case ContentDialogResult.Primary:
+                _markdownEditor.ApplyLink(textBox.Text.Trim(), urlBox.Text.Trim());
+                break;
+            case ContentDialogResult.Secondary:
+                _markdownEditor.ApplyLink(textBox.Text, string.Empty); // the words stay, the link goes
+                break;
+            default:
+                _markdownEditor.ApplyLink(string.Empty, "-"); // cancelled: the page forgets the request
+                break;
+        }
+
+        FocusEditor();
+    }
+
+    /// <summary>Ctrl+click on a link: shows the address and opens it in the default browser only if confirmed.</summary>
+    private async Task ConfirmOpenLinkAsync(string url)
+    {
+        if (XamlRoot is null || !WebMarkdownEditor.IsSafeUrl(url))
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "リンクを開きますか？",
+            Content = new TextBlock { Text = url, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
+            PrimaryButtonText = "ブラウザで開く",
+            CloseButtonText = "やめる",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            await Windows.System.Launcher.LaunchUriAsync(new Uri(url));
         }
     }
 
@@ -1872,7 +2017,7 @@ public sealed partial class MainPage : Page
         AudioInfoBar.Title = title;
         AudioInfoBar.Message = message;
         AudioInfoBar.ActionButton = action;
-        ToolTipService.SetToolTip(AudioInfoBar, details);
+        HoverToolTips.Set(AudioInfoBar, details);
         AutomationProperties.SetHelpText(AudioInfoBar, details ?? string.Empty);
         AudioInfoBar.IsOpen = true;
     }
@@ -1949,7 +2094,7 @@ public sealed partial class MainPage : Page
 
         try
         {
-            _recorder.Start(sources);
+            _recorder.Start(sources, target.Id);
         }
         catch (AudioCaptureException ex)
         {
@@ -1964,8 +2109,10 @@ public sealed partial class MainPage : Page
         _recordingSources = sources;
         StartLevelTimer();
 
-        // A new recording supersedes audio that was waiting for a retry.
-        SetPendingAudio(null);
+        // Audio that was waiting for a retry is not deleted by a new recording: it is kept and
+        // offered again at the next start (recover or delete).
+        _pendingAudio?.Keep();
+        _pendingAudio = null;
         AudioInfoBar.IsOpen = false;
         SetVoiceState(VoiceState.Recording);
         _recordingClock.Start();
@@ -1984,6 +2131,16 @@ public sealed partial class MainPage : Page
         try
         {
             audio = await _recorder.StopAsync();
+        }
+        catch (RecordingSaveException ex)
+        {
+            // Nothing was deleted: the captured audio can be processed again (or deleted) now or after a restart.
+            string? noteId = _recordingNoteId;
+            ShowAudioMessage(InfoBarSeverity.Error, "録音の後処理に失敗しました",
+                "録音された音声は一時フォルダに保護しています。「もう一度処理」で文字起こしできます（次回の起動時にも確認します）。",
+                CreateRecoverButton(ex.SessionDirectory, noteId), details: ex.Message);
+            SetVoiceState(VoiceState.Idle);
+            return;
         }
         catch (Exception ex)
         {
@@ -2034,7 +2191,9 @@ public sealed partial class MainPage : Page
             TranscriptionResult result;
             await using (var stream = File.OpenRead(audio.FilePath!))
             {
-                result = await _transcriber.TranscribeAsync(stream, cts.Token, progress);
+                // Finished windows are saved next to the audio: a retry continues where this one stopped.
+                result = await _transcriber.TranscribeAsync(stream, cts.Token, progress,
+                    System.IO.Path.Combine(audio.SessionDirectory, TranscriptionCheckpoint.FileName));
             }
 
             // Numbers only (durations, segment counts, repeats) for diagnosing real recordings.
@@ -2046,7 +2205,7 @@ public sealed partial class MainPage : Page
 
             if (result.IsEmpty)
             {
-                SetPendingAudio(null);
+                DeletePendingAudio();
                 ShowAudioMessage(InfoBarSeverity.Warning, "音声を認識できませんでした", "話し声が含まれていない可能性があります。");
                 return;
             }
@@ -2055,7 +2214,7 @@ public sealed partial class MainPage : Page
             outcome = "文字起こし 完了";
 
             // Success: raw audio is temporary by design and is deleted right away.
-            SetPendingAudio(null);
+            DeletePendingAudio();
         }
         catch (OperationCanceledException)
         {
@@ -2162,10 +2321,129 @@ public sealed partial class MainPage : Page
     {
         if (_pendingAudio is not null && !ReferenceEquals(_pendingAudio, audio))
         {
-            _pendingAudio.Delete();
+            _pendingAudio.Keep(); // never deleted just because another recording came along
         }
 
         _pendingAudio = audio;
+    }
+
+    /// <summary>The transcript is in the note (or there was no speech): the audio is not needed any more.</summary>
+    private void DeletePendingAudio()
+    {
+        _pendingAudio?.Delete();
+        _pendingAudio = null;
+    }
+
+    // ----- Recordings left from an earlier run (crash, failed processing, kept for a retry) -----
+
+    /// <summary>
+    /// Asks what to do with recordings left from an earlier run. Nothing is deleted without the
+    /// user: they can transcribe one (into the note it was made for, or a new note) or delete them.
+    /// </summary>
+    public void OfferLeftoverRecordings()
+    {
+        if (_recorder is null || VoiceState != VoiceState.Idle)
+        {
+            return;
+        }
+
+        var leftovers = _recorder.FindLeftovers().Where(l => _pendingAudio is null || l.Directory != _pendingAudio.SessionDirectory).ToList();
+        if (leftovers.Count == 0)
+        {
+            return;
+        }
+
+        var oldest = leftovers[0];
+        var menu = new MenuFlyout();
+        var transcribe = new MenuFlyoutItem { Text = $"文字起こしする（{oldest.Created:M/d H:mm} の録音）" };
+        transcribe.Click += async (_, _) => await RecoverAndTranscribeAsync(oldest.Directory, RecordingManifest.Load(oldest.Directory)?.NoteId);
+        var delete = new MenuFlyoutItem { Text = leftovers.Count == 1 ? "削除する" : $"{leftovers.Count} 件すべて削除する" };
+        delete.Click += async (_, _) => await ConfirmDeleteLeftoversAsync(leftovers);
+        menu.Items.Add(transcribe);
+        menu.Items.Add(delete);
+        var button = new DropDownButton { Content = "選択…", Flyout = menu };
+        AutomationProperties.SetName(button, "残っている録音の操作");
+
+        var total = TimeSpan.FromSeconds(leftovers.Sum(l => l.EstimatedDuration.TotalSeconds));
+        ShowAudioMessage(InfoBarSeverity.Warning, "前回の録音が残っています",
+            $"{leftovers.Count} 件（合計 約 {Math.Max(1, (int)Math.Round(total.TotalMinutes))} 分）。一時フォルダに保護しています。文字起こしするか削除してください。",
+            button, details: string.Join(Environment.NewLine, leftovers.Select(l => $"{l.Created:yyyy-MM-dd HH:mm}  約 {Math.Max(1, (int)Math.Round(l.EstimatedDuration.TotalMinutes))} 分  {l.Bytes / 1_048_576.0:0} MB  {StateLabel(l.State)}")));
+    }
+
+    private static string StateLabel(string state) => state switch
+    {
+        RecordingStates.Recording => "録音中に終了",
+        RecordingStates.Stopped or RecordingStates.Failed => "後処理に失敗",
+        RecordingStates.Kept => "再試行待ち",
+        _ => "未処理",
+    };
+
+    private async Task ConfirmDeleteLeftoversAsync(IReadOnlyList<LeftoverRecording> leftovers)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "録音を削除しますか？",
+            Content = $"{leftovers.Count} 件の録音を完全に削除します。元に戻せません。",
+            PrimaryButtonText = "削除する",
+            CloseButtonText = "やめる",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary || _recorder is null)
+        {
+            return;
+        }
+
+        int removed = _recorder.DeleteLeftovers(leftovers);
+        ShowAudioMessage(removed == leftovers.Count ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
+            removed == leftovers.Count ? "録音を削除しました" : "一部の録音を削除できませんでした",
+            removed == leftovers.Count ? string.Empty : "ファイルが使用中の可能性があります。あとでもう一度お試しください。");
+    }
+
+    private Button CreateRecoverButton(string sessionDirectory, string? noteId)
+    {
+        var button = new Button { Content = "もう一度処理" };
+        AutomationProperties.SetName(button, "録音をもう一度処理");
+        button.Click += async (_, _) => await RecoverAndTranscribeAsync(sessionDirectory, noteId);
+        return button;
+    }
+
+    /// <summary>
+    /// Makes the transcription file from a kept recording and transcribes it into the note it was
+    /// recorded for (a new note if that one no longer exists). The audio is deleted only on success.
+    /// </summary>
+    private async Task RecoverAndTranscribeAsync(string sessionDirectory, string? noteId)
+    {
+        if (VoiceState != VoiceState.Idle || _workspace is null)
+        {
+            return;
+        }
+
+        SetVoiceState(VoiceState.Processing);
+        ShowAudioMessage(InfoBarSeverity.Informational, "録音を処理しています", "長い録音では数分かかることがあります。");
+        RecordedAudio audio;
+        try
+        {
+            audio = await AudioRecorder.RecoverAsync(sessionDirectory);
+        }
+        catch (Exception ex)
+        {
+            SetVoiceState(VoiceState.Idle);
+            ShowAudioMessage(InfoBarSeverity.Error, "録音を処理できませんでした",
+                "音声は削除していません。もう一度試すか、不要なら次回の起動時に削除できます。", details: ex.Message);
+            return;
+        }
+
+        SetVoiceState(VoiceState.Idle);
+        if (noteId is null || _workspace.Library.Find(noteId) is null)
+        {
+            var (tab, _) = await _workspace.CreateNoteAsync($"録音の復元 {DateTime.Now:yyyy-MM-dd HHmm}", string.Empty);
+            noteId = tab.Id;
+            RenderTabs();
+        }
+
+        _recordingNoteId = noteId;
+        await TranscribeAsync(audio);
     }
 
     // A transcript that arrived while the IME was composing. When composition ends it is
@@ -2269,7 +2547,7 @@ public sealed partial class MainPage : Page
             _ => "録音開始",
         };
         AutomationProperties.SetName(RecordButton, label);
-        ToolTipService.SetToolTip(RecordButton, $"{label} (Ctrl+R)");
+        HoverToolTips.Set(RecordButton, $"{label} (Ctrl+R)");
         RecordIcon.Glyph = state switch
         {
             VoiceState.Recording => "",    // Stop
@@ -2368,7 +2646,7 @@ public sealed partial class MainPage : Page
             _ => name,
         };
         AutomationProperties.SetHelpText(MicDeviceButton, _micDeviceName);
-        ToolTipService.SetToolTip(MicDeviceButton, $"マイクの入力デバイス：{_micDeviceName}");
+        HoverToolTips.Set(MicDeviceButton, $"マイクの入力デバイス：{_micDeviceName}");
         UpdateSourceIcons();
 
         string? problem = MicToggle.IsChecked == true ? resolved.Problem : null;
@@ -2496,8 +2774,8 @@ public sealed partial class MainPage : Page
         MicIcon.IsOn = mic || _micTest is not null; // crossed out when off (shape, not only color)
         SystemAudioIcon.IsOn = pc;
         string device = _micDeviceName.Length > 0 ? "\n" + _micDeviceName : string.Empty;
-        ToolTipService.SetToolTip(MicToggle, (mic ? "マイク：録音する（クリックでオフ）" : "マイク：録音しない（クリックでオン）") + device);
-        ToolTipService.SetToolTip(SystemAudioToggle, pc ? "PC音声：録音する（クリックでオフ）" : "PC音声：録音しない（クリックでオン）");
+        HoverToolTips.Set(MicToggle, (mic ? "マイク：録音する（クリックでオフ）" : "マイク：録音しない（クリックでオン）") + device);
+        HoverToolTips.Set(SystemAudioToggle, pc ? "PC音声：録音する（クリックでオフ）" : "PC音声：録音しない（クリックでオン）");
     }
 
     // ----- Level indicators and microphone test ------------------------------------

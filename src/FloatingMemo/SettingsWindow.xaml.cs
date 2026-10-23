@@ -44,8 +44,10 @@ public sealed partial class SettingsWindow : Window
         LoadModels();
         CorrectToggle.IsOn = services.Preferences.CorrectTranscriptBeforeMinutes;
         VisualToggle.IsOn = services.Preferences.VisualEditor;
+        WrapToggle.IsOn = services.Preferences.WrapLines;
         AccelerationBox.SelectedIndex = (int)services.Preferences.Acceleration;
         PriorityBox.SelectedIndex = (int)services.Preferences.MinutesPriority;
+        ShowWhisperModels();
         ShowAccelerationReport();
         ClaritySlider.Value = Math.Round(services.Preferences.GlassClarity * 100);
         PaperSlider.Value = Math.Round(services.Preferences.PaperMilkiness * 100);
@@ -155,6 +157,34 @@ public sealed partial class SettingsWindow : Window
     {
         try
         {
+            // Checked and shown before anything is saved; another JSON shape gets guidance, not a guess.
+            if (new FileInfo(path).Length <= TemplateRules.MaxFileBytes)
+            {
+                var check = TemplateImportCheck.Inspect(File.ReadAllText(path), Path.GetFileName(path));
+                if (check.Template is null)
+                {
+                    string hints = check.Hints.Count > 0 ? "\n\n" + string.Join("\n", check.Hints.Select(h => "・" + h)) : string.Empty;
+                    await Message("読み込めませんでした", check.Error + hints + "\n\n対応している形式（JSON）の例:\n" + TemplateImportCheck.Example);
+                    return;
+                }
+
+                var preview = string.Join("\n", check.Template.Sections.Select((sec, i) =>
+                    $"{i + 1}. {sec.Title}{(sec.Kind == TemplateRules.Draft ? "（下書き）" : string.Empty)}{(sec.Instruction.Length > 0 ? " — " + sec.Instruction : string.Empty)}"));
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = Content.XamlRoot,
+                    Title = $"「{check.Template.Name}」を読み込みますか？",
+                    Content = new ScrollViewer { MaxHeight = 360, Content = new TextBlock { Text = $"{check.Template.Sections.Count} 個の見出し:\n{preview}", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } },
+                    PrimaryButtonText = "読み込む",
+                    CloseButtonText = "やめる",
+                    DefaultButton = ContentDialogButton.Primary,
+                };
+                if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                {
+                    return;
+                }
+            }
+
             var t = _services.Templates.Import(path);
             RenderTemplates(t.Id);
             await Message("テンプレートを読み込みました", $"「{t.Name}」（{t.Sections.Count} 見出し）。議事録ボタン →「議事録の形式」で選ぶと使われます。");
@@ -299,6 +329,46 @@ public sealed partial class SettingsWindow : Window
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{LlamaTextGenerator.ModelsDirectory}\"") { UseShellExecute = true });
     }
 
+    private IReadOnlyList<(string Name, string Path)> _whisperModels = [];
+    private bool _fillingWhisper; // the list is being rebuilt: selection changes are not choices
+
+    /// <summary>Installed Whisper models (nothing is downloaded, moved or deleted) and the one in use.</summary>
+    private void ShowWhisperModels()
+    {
+        _whisperModels = FloatingMemo.Services.Transcription.LocalWhisperTranscriptionService.InstalledModels();
+        _fillingWhisper = true;
+        WhisperBox.Items.Clear();
+        WhisperBox.Items.Add("自動（入っているモデルのうち base を優先）");
+        foreach (var (name, _) in _whisperModels)
+        {
+            WhisperBox.Items.Add(FloatingMemo.Services.Transcription.LocalWhisperTranscriptionService.Describe(name));
+        }
+
+        int chosen = _whisperModels.ToList().FindIndex(m => string.Equals(m.Name, _services.Preferences.WhisperModel, StringComparison.OrdinalIgnoreCase));
+        WhisperBox.SelectedIndex = chosen + 1;
+        _fillingWhisper = false;
+        string inUse = System.IO.Path.GetFileName(_services.Transcriber.ModelPath);
+        string pending = string.Equals(System.IO.Path.GetFileName(FloatingMemo.Services.Transcription.LocalWhisperTranscriptionService.ResolveModelPath(_services.Preferences.WhisperModel)), inUse, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : "\n変更はアプリを再起動すると反映されます。";
+        WhisperReport.Text = (_whisperModels.Count == 0
+            ? "Whisper のモデルが見つかりません（README の手順で models\\whisper に置いてください）。"
+            : $"使用中: {inUse}（{(_services.Transcriber.IsModelLoaded ? "読み込み済み" : "最初の文字起こしで読み込み")}）") + pending;
+    }
+
+    private void OnWhisperChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || _fillingWhisper || WhisperBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _services.Preferences.WhisperModel = WhisperBox.SelectedIndex == 0 ? null : _whisperModels[WhisperBox.SelectedIndex - 1].Name;
+        _services.Settings.TrySave(_services.Preferences);
+        // Only the report changes; rebuilding the list here would fight the selection being made.
+        DispatcherQueue.TryEnqueue(ShowWhisperModels);
+    }
+
     private void OnPriorityChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_loading || PriorityBox.SelectedIndex < 0)
@@ -330,6 +400,18 @@ public sealed partial class SettingsWindow : Window
             : string.Empty;
         AccelerationReport.Text = AccelerationState.Report() + pending
             + "\nGPU は Vulkan で使います（NVIDIA・AMD・Intel）。使えないときは自動で CPU になります。";
+    }
+
+    private void OnWrapToggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading)
+        {
+            return;
+        }
+
+        _services.Preferences.WrapLines = WrapToggle.IsOn;
+        _services.Settings.TrySave(_services.Preferences);
+        FloatingMemo.Editing.EditorDisplay.SetWrap(WrapToggle.IsOn);
     }
 
     private void OnVisualToggled(object sender, RoutedEventArgs e)
