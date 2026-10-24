@@ -73,6 +73,8 @@ $suites = [ordered]@{
     'visual'        = @()
     'recovery'      = @('-Speech', $speech)
     'editorux'      = @()
+    'listdrag'      = @()
+    'preview'       = @()
     'integration'   = @('-LongSpeech', $long)
 }
 

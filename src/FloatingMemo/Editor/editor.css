@@ -193,9 +193,55 @@ html, body {
 .cm-scroller { position: relative; }
 .cm-editor .cm-content { padding-left: 24px; } /* beats CodeMirror's own padding: room for the handles */
 .cm-listItemLine { position: relative; }
-.cm-drag-handle { position: absolute; left: -18px; top: 0; width: 14px; text-align: center; cursor: grab; opacity: 0;
+.cm-drag-handle { display: inline-block; position: relative; width: 14px; margin-left: -14px; left: -4px; text-align: center; cursor: grab; opacity: 0;
   color: var(--muted); user-select: none; font-size: 0.85em; transition: opacity .12s; }
 .cm-listItemLine:hover .cm-drag-handle, .cm-dragging-item .cm-drag-handle { opacity: 0.75; }
 .cm-dragging-item, .cm-dragging-item * { cursor: grabbing !important; }
 .cm-drop-indicator { position: absolute; display: none; right: 10px; height: 2px; border-radius: 1px; background: var(--accent);
   pointer-events: none; z-index: 5; }
+
+/* ----- Preview (read-only rendering of the note) ------------------------------------------ */
+#preview {
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  overflow-x: hidden;          /* only tables and code blocks scroll sideways */
+  padding: 4px 18px 32px 24px;
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Yu Gothic UI", "Meiryo UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+#preview[hidden] { display: none; }
+.pv-body > :first-child { margin-top: 6px; }
+#preview h1, #preview h2, #preview h3, #preview h4, #preview h5, #preview h6 { margin: 1.1em 0 0.45em; line-height: 1.35; font-weight: 650; }
+#preview h1 { font-size: 1.6em; padding-bottom: 0.2em; border-bottom: 1px solid var(--faint); }
+#preview h2 { font-size: 1.35em; padding-bottom: 0.15em; border-bottom: 1px solid var(--faint); }
+#preview h3 { font-size: 1.18em; }
+#preview h4 { font-size: 1.05em; }
+#preview h5 { font-size: 0.95em; }
+#preview h6 { font-size: 0.9em; color: var(--muted); }
+#preview p { margin: 0.5em 0; }
+#preview ul, #preview ol { margin: 0.4em 0; padding-left: 1.6em; }
+#preview li { margin: 0.15em 0; }
+#preview li > ul, #preview li > ol { margin: 0.1em 0; }
+#preview ul.pv-tasks { list-style: none; padding-left: 1.3em; }
+#preview li.pv-task > input[type=checkbox] { margin: 0 0.45em 0 -1.25em; vertical-align: -0.12em; accent-color: var(--accent); }
+#preview li.pv-task > input:checked + span { color: var(--done); text-decoration: line-through; }
+#preview blockquote { margin: 0.6em 0; padding: 0.1em 0 0.1em 0.9em; border-left: 3px solid var(--faint); color: var(--muted); }
+#preview hr { border: none; border-top: 1px solid var(--faint); margin: 1.1em 0; }
+#preview code { font-family: "Cascadia Mono", Consolas, "BIZ UDGothic", monospace; font-size: 0.9em; }
+#preview .pv-inline-code, #preview code.pv-raw { background: var(--code-bg); border-radius: 4px; padding: 0.05em 0.3em; }
+#preview pre { background: var(--code-bg); border-radius: 6px; padding: 0.6em 0.8em; overflow-x: auto; overflow-wrap: normal; white-space: pre; line-height: 1.5; }
+#preview pre.pv-raw { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.85em; color: var(--muted); }
+#preview .pv-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+#preview .pv-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+#preview .pv-image { color: var(--muted); font-size: 0.9em; }
+#preview .pv-footnotes { font-size: 0.9em; color: var(--muted); }
+#preview .pv-table { overflow-x: auto; margin: 0.7em 0; max-width: 100%; }
+#preview table { border-collapse: collapse; overflow-wrap: normal; }
+#preview th, #preview td { border: 1px solid var(--table-border, rgba(127, 127, 127, 0.45)); padding: 0.35em 0.7em; vertical-align: top; text-align: left; min-width: 5em; max-width: 28em; }
+#preview th { background: var(--code-bg); font-weight: 650; }
+#preview tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--code-bg) 50%, transparent); }

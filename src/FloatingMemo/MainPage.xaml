@@ -364,6 +364,7 @@
         -->
         <WebView2
             x:Name="EditorWebView"
+            AutomationProperties.AutomationId="EditorWebView"
             TabIndex="0"
             Visibility="Collapsed" />
 
@@ -487,8 +488,20 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Link (Ctrl+K) and AI minutes (local LLM). -->
+            <!-- Edit/preview (Ctrl+E), link (Ctrl+K) and AI minutes (local LLM). -->
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+            <Button
+                x:Name="PreviewButton"
+                Width="34"
+                Height="32"
+                Padding="0"
+                AllowFocusOnInteraction="False"
+                AutomationProperties.AutomationId="PreviewButton"
+                AutomationProperties.Name="プレビュー"
+                Click="OnPreviewClick"
+                ToolTipService.ToolTip="プレビュー：読み取り専用で表示 (Ctrl+E)">
+                <FontIcon x:Name="PreviewIcon" FontSize="14" Glyph="&#xE890;" />
+            </Button>
             <Button
                 x:Name="LinkButton"
                 Width="34"

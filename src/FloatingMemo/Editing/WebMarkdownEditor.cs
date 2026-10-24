@@ -112,6 +112,9 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             editor._theme = theme;
             editor._paper = paper;
             editor.Configure(webView.CoreWebView2, editorFolder, ready);
+            // The page files come from the app folder; a disk cache shared between versions could
+            // otherwise serve the previous version's editor.css/js after an update.
+            await webView.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
             webView.CoreWebView2.Navigate(editor._editorUri.ToString());
 
             var finished = await Task.WhenAny(ready.Task, Task.Delay(TimeSpan.FromSeconds(15)));
@@ -178,6 +181,10 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             {
                 PostTheme();
                 Post(new JsonObject { ["type"] = "options", ["wrap"] = _wrap });
+                if (_preview)
+                {
+                    Post(new JsonObject { ["type"] = "mode", ["preview"] = true });
+                }
 
                 ready.TrySetResult();
                 return;
@@ -188,7 +195,7 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     }
 
     private static readonly HashSet<string> Commands =
-        ["hide", "new", "open", "export", "close", "save", "next", "previous", "reopen", "rename", "record", "focusOut", "wrap"];
+        ["hide", "new", "open", "export", "close", "save", "next", "previous", "reopen", "rename", "record", "focusOut", "wrap", "preview"];
 
     /// <summary>Ctrl+K: the page asks for a link address (text = selected words, url = the existing link's).</summary>
     public event EventHandler<(string Text, string Url, bool Existing)>? LinkRequested;
@@ -204,6 +211,34 @@ internal sealed class WebMarkdownEditor : IMemoEditor
         _wrap = wrap;
         Post(new JsonObject { ["type"] = "options", ["wrap"] = wrap });
     }
+
+    private bool _preview;
+
+    /// <summary>True while the note is shown rendered and read-only (the source editor only).</summary>
+    public bool IsPreview => _preview;
+
+    /// <summary>The page switched between editing and the preview (it may refuse, e.g. while the IME composes).</summary>
+    public event EventHandler<bool>? PreviewChanged;
+
+    /// <summary>
+    /// Edit ⇄ preview. Display only: the page keeps the note's text, caret, selection and undo
+    /// history and renders a read-only view of the current text; nothing is saved or changed.
+    /// </summary>
+    public void SetPreview(bool preview)
+    {
+        if (Visual)
+        {
+            return;
+        }
+
+        Post(new JsonObject { ["type"] = "mode", ["preview"] = preview });
+    }
+
+    /// <summary>Tests: asks the page where the list handles are (see <see cref="ProbeResult"/>).</summary>
+    public void Probe() => Post(new JsonObject { ["type"] = "probe" });
+
+    /// <summary>Tests: list handle positions in page coordinates (JSON, line numbers only, no text).</summary>
+    public string? ProbeResult { get; private set; }
 
     /// <summary>The link button: same as Ctrl+K in the page.</summary>
     public void RequestLink() => Post(new JsonObject { ["type"] = "link" });
@@ -278,6 +313,25 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             case "linkRequest":
                 LinkRequested?.Invoke(this, (Str(message, "text") is { Length: <= 1000 } t ? t : string.Empty,
                     Str(message, "url") is { Length: <= 2048 } u ? u : string.Empty, message["existing"]?.GetValueKind() == JsonValueKind.True));
+                break;
+            case "mode":
+                if (message["preview"] is JsonValue modeValue && modeValue.TryGetValue(out bool preview))
+                {
+                    bool changed = preview != _preview;
+                    _preview = preview;
+                    if (changed)
+                    {
+                        PreviewChanged?.Invoke(this, preview);
+                    }
+                }
+
+                break;
+            case "probeResult":
+                if (Str(message, "data") is { Length: <= 16_384 } data)
+                {
+                    ProbeResult = data;
+                }
+
                 break;
             case "openLink":
                 if (Str(message, "url") is { } link && IsSafeUrl(link))

@@ -77,6 +77,11 @@ export function moveSpec(state, item, beforeLine, level) {
   }
   const moved = lines.join('\n');
 
+  // Same place, other level: only the item's own lines are replaced (re-indented).
+  if (inPlace) {
+    return { changes: { from: item.from, to: item.to, insert: moved }, selection: EditorSelection.cursor(item.from + newIndent.length), userEvent: 'move.list', scrollIntoView: true };
+  }
+
   // Both changes use the original positions, so they are one change (one Undo step).
   const last = item.lastLine === doc.lines;
   const removal = !last ? { from: item.from, to: doc.line(item.lastLine + 1).from }
@@ -145,7 +150,7 @@ const handles = ViewPlugin.fromClass(class {
     const marks = [];
     for (const item of listItems(view.state)) {
       const line = view.state.doc.line(item.firstLine);
-      marks.push(Decoration.widget({ widget: new HandleWidget(item.firstLine), side: -1 }).range(line.from));
+      marks.push(Decoration.widget({ widget: new HandleWidget(item.firstLine), side: -1 }).range(line.from + item.indent.length));
       marks.push(Decoration.line({ class: 'cm-listItemLine' }).range(line.from));
     }
     return Decoration.set(marks, true);
@@ -170,15 +175,19 @@ function targetAt(view, x, y) {
   const top = view.documentTop + block.top;
   const beforeLine = y > top + block.height / 2 ? line.number + 1 : line.number;
   const { max } = allowedLevels(state, beforeLine, drag.item);
-  // Half an indent to the right of a level's start already counts as that level.
-  const level = Math.max(0, Math.min(max, Math.floor((x - textLeft(view)) / indentWidth(view) + 0.5)));
-  return { beforeLine, level };
+  // The level changes only with a clear sideways movement since the drag started (more than
+  // 60% of an indent); moving up or down keeps the item's own level. A level the drop place
+  // does not allow refuses the drop instead of silently changing the level.
+  const steps = (x - drag.startX) / indentWidth(view);
+  const delta = Math.abs(steps) < 0.6 ? 0 : Math.round(steps);
+  const level = Math.max(0, drag.item.level + delta);
+  return { beforeLine, level, allowed: level <= max };
 }
 
 function showIndicator(view, target) {
-  const spec = target && moveSpec(view.state, drag.item, target.beforeLine, target.level);
+  const spec = target && target.allowed && moveSpec(view.state, drag.item, target.beforeLine, target.level);
   const ind = drag.indicator;
-  if (!target || (!spec && !(target.beforeLine === drag.item.firstLine && target.level === drag.item.level))) {
+  if (!target || !target.allowed || (!spec && !(target.beforeLine === drag.item.firstLine && target.level === drag.item.level))) {
     ind.style.display = 'none';
     drag.target = null;
     return;
@@ -219,7 +228,14 @@ function onMove(e) {
   lastPointer = { x: e.clientX, y: e.clientY };
   showIndicator(activeView, targetAt(activeView, e.clientX, e.clientY));
 }
-function onUp(e) { if (drag) { e.preventDefault(); endDrag(activeView, true); } }
+function onUp(e) {
+  if (!drag) return;
+  e.preventDefault();
+  // The drop goes where the button is released, even when no move event came in between
+  // (a quick flick, or a pointer that jumped).
+  showIndicator(activeView, targetAt(activeView, e.clientX, e.clientY));
+  endDrag(activeView, true);
+}
 function onKey(e) { if (drag && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endDrag(activeView, false); } }
 
 const dragStart = EditorView.domEventHandlers({
@@ -233,7 +249,7 @@ const dragStart = EditorView.domEventHandlers({
     const indicator = document.createElement('div');
     indicator.className = 'cm-drop-indicator';
     view.scrollDOM.appendChild(indicator);
-    drag = { item, target: null, indicator, scroll: 0 };
+    drag = { item, target: null, indicator, scroll: 0, startX: event.clientX };
     view.dom.classList.add('cm-dragging-item');
     lastPointer = { x: event.clientX, y: event.clientY };
     // Scroll while the pointer is near the top or bottom edge.

@@ -13,6 +13,7 @@ import { history, historyKeymap, defaultKeymap, indentMore, indentLess, insertTa
 import { syntaxTree, indentUnit } from './vendor/codemirror-language/dist/index.js';
 import { markdown, markdownLanguage, insertNewlineContinueMarkup } from './vendor/codemirror-lang-markdown/dist/index.js';
 import { listDrag, listItems, moveSpec } from './listdrag.js';
+import { renderPreview } from './preview.js';
 
 const host = window.chrome && window.chrome.webview;
 const post = (message) => { if (host) host.postMessage(message); };
@@ -517,6 +518,7 @@ const appKeymap = Prec.highest(keymap.of([
   { key: 'F2', run: command('rename') },
   { key: 'F6', run: command('focusOut') },
   { key: 'Mod-k', run: requestLink },
+  { key: 'Mod-e', run: command('preview') },
   { key: 'Backspace', run: deleteAutoPair },
   { key: 'Mod-b', run: toggleWrap('**') },
   { key: 'Mod-i', run: toggleWrap('*') },
@@ -564,9 +566,16 @@ function onUpdate(update) {
     post({ type: 'caret', id: currentId, caret: update.state.selection.main.head });
   }
   if (update.focusChanged) post({ type: 'focus', focused: update.view.hasFocus });
+  if (previewOn && update.docChanged) schedulePreview();
 }
 
-const view = new EditorView({ parent: document.getElementById('editor'), state: createState('', 0, false) });
+// Preview mode (see setPreview); declared before the view exists, which reads previewOn.
+const editorEl = document.getElementById('editor');
+const previewEl = document.getElementById('preview');
+let previewOn = false;
+let editorScroll = null;
+let previewTimer = 0;
+const view = new EditorView({ parent: editorEl, state: createState('', 0, false) });
 
 // Shows a note. Reuses the note's previous state (undo history) if its text is unchanged.
 function load(id, text, caret, isReadOnly) {
@@ -588,7 +597,86 @@ function load(id, text, caret, isReadOnly) {
   view.setState(state);
   view.dispatch({ effects: wrapping.reconfigure(wrapExtension()) }); // a kept state may have the other setting
   view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
+  if (previewOn) {
+    editorScroll = null;   // another note: back in the editor, show its caret
+    renderNow();
+    previewEl.scrollTop = 0;
+  }
 }
+
+// ----- Preview: the note rendered read-only (display only; the note is never changed) ------
+// The editor state (text, caret, selection, undo history) stays as it is underneath; the
+// preview is rebuilt from the current text, including edits not saved yet.
+
+function renderNow() {
+  clearTimeout(previewTimer);
+  previewTimer = 0;
+  renderPreview(previewEl, view.state.doc.toString());
+}
+
+// A transcript arriving while the preview is shown: re-render, keeping the reading position.
+function schedulePreview() {
+  if (previewTimer) return;
+  previewTimer = setTimeout(() => {
+    const top = previewEl.scrollTop;
+    renderNow();
+    previewEl.scrollTop = top;
+  }, 150);
+}
+
+function setPreview(on) {
+  // Never in the middle of an IME composition: the unfinished text would be lost.
+  if (on !== previewOn && !(on && view.composing)) {
+    const sc = view.scrollDOM;
+    if (on) {
+      editorScroll = sc.scrollTop;
+      const ratio = sc.scrollHeight > sc.clientHeight ? sc.scrollTop / (sc.scrollHeight - sc.clientHeight) : 0;
+      renderNow();
+      previewOn = true;
+      editorEl.hidden = true;
+      previewEl.hidden = false;
+      previewEl.scrollTop = Math.round(ratio * Math.max(0, previewEl.scrollHeight - previewEl.clientHeight));
+      previewEl.focus({ preventScroll: true });
+    } else {
+      previewOn = false;
+      clearTimeout(previewTimer);
+      previewTimer = 0;
+      previewEl.hidden = true;
+      previewEl.replaceChildren();
+      editorEl.hidden = false;
+      view.requestMeasure();
+      if (editorScroll === null) view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
+      else sc.scrollTop = editorScroll;
+      view.focus();
+    }
+  }
+  post({ type: 'mode', preview: previewOn });
+}
+
+// Keys in the preview: the app's shortcuts still work; nothing edits the note from here.
+const previewKeys = { n: 'new', o: 'open', w: 'close', s: 'save', r: 'record', e: 'preview' };
+previewEl.addEventListener('keydown', (e) => {
+  let name = null;
+  if (e.key === 'Escape') name = 'hide';
+  else if (e.key === 'F6') name = 'focusOut';
+  else if (e.key === 'F2') name = 'rename';
+  else if (e.ctrlKey && e.key === 'Tab') name = e.shiftKey ? 'previous' : 'next';
+  else if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') name = 'reopen';
+  else if (e.ctrlKey && e.shiftKey && e.code === 'KeyE') name = 'export';
+  else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code.startsWith('Key')) name = previewKeys[e.code.slice(3).toLowerCase()] || null;
+  if (name) {
+    e.preventDefault();
+    post({ type: 'command', name });
+  } else if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('pv-link')) {
+    e.preventDefault();
+    post({ type: 'openLink', url: e.target.dataset.url });
+  }
+});
+// A click on a link asks the host, which shows the address before opening anything.
+previewEl.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('.pv-link');
+  if (a) post({ type: 'openLink', url: a.dataset.url });
+});
 
 // Same rule as the C# TranscriptInsertion: the transcript becomes its own paragraph at the caret.
 function insertTranscript(text) {
@@ -631,7 +719,7 @@ view.contentDOM.addEventListener('compositionend', (e) => {
 // Whenever the page receives focus (window shown, WebView focused by the host), put the caret
 // back into the editor. A focus request from the host can arrive before the page actually
 // has focus, in which case view.focus() alone would do nothing.
-window.addEventListener('focus', () => { if (!view.hasFocus) view.focus(); });
+window.addEventListener('focus', () => { if (previewOn) previewEl.focus({ preventScroll: true }); else if (!view.hasFocus) view.focus(); });
 
 // Alt+Z (wrap on/off) by key position: with Alt held, the key value depends on the layout and IME.
 document.addEventListener('keydown', (e) => {
@@ -671,7 +759,11 @@ function handleHost(message) {
       if (isId(message.id)) states.delete(message.id);
       break;
     case 'focus':
-      view.focus();
+      if (previewOn) previewEl.focus({ preventScroll: true });
+      else view.focus();
+      break;
+    case 'mode':
+      if (typeof message.preview === 'boolean') setPreview(message.preview);
       break;
     case 'options':
       if (typeof message.wrap === 'boolean' && message.wrap !== wrapOn) {
@@ -681,6 +773,13 @@ function handleHost(message) {
       break;
     case 'link':
       requestLink(view);
+      break;
+    case 'probe':
+      // Tests only need where the list handles are (line numbers and coordinates, no text).
+      post({ type: 'probeResult', data: JSON.stringify({ dpr: devicePixelRatio, down: lastDown, preview: previewProbe(), handles: [...document.querySelectorAll('.cm-drag-handle')].map((h) => {
+        const b = h.getBoundingClientRect();
+        return { line: Number(h.dataset.line), x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+      }) }) });
       break;
     case 'applyLink':
       if (typeof message.url === 'string' && message.url.length <= 2048 && typeof message.text === 'string' && message.text.length <= 1000) {
@@ -717,7 +816,7 @@ if (host) {
   host.addEventListener('message', (e) => handleHost(e.data));
 } else {
   // Opened in a normal browser for development (no app host): expose a handle for testing.
-  window.floatingMemoDebug = { view, load, handleHost, listItems, moveSpec };
+  window.floatingMemoDebug = { view, load, handleHost, listItems, moveSpec, previewProbe };
 }
 // Tells the host which cursor colour is in effect (only a colour value; used by tests).
 function reportCaret() {
@@ -727,3 +826,26 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', reportCare
 
 post({ type: 'ready' });
 reportCaret();
+
+// Tests: what the preview shows, as element counts only (no note text).
+function previewProbe() {
+  if (!previewOn) return null;
+  const count = (sel) => previewEl.querySelectorAll(sel).length;
+  return {
+    h: [1, 2, 3, 4, 5, 6].map((d) => count(`h${d}`)), strong: count('strong'), em: count('em'), del: count('del'),
+    ul: count('ul'), ol: count('ol'), nested: count('li ul, li ol'), tasks: count('input[type=checkbox]'),
+    checked: count('input[type=checkbox]:checked'), enabledBoxes: count('input:not([disabled])'),
+    quote: count('blockquote'), hr: count('hr'), code: count('pre'), inlineCode: count('.pv-inline-code'),
+    links: count('.pv-link'), tables: count('.pv-table table'), th: count('th'), td: count('td'),
+    cellStrong: count('td strong, th strong'), cellLinks: count('td .pv-link, th .pv-link'), br: count('br'),
+    raw: count('.pv-raw'), images: count('img'), scripts: count('script, iframe, object, embed'),
+    handlers: [...previewEl.querySelectorAll('*')].filter((n) => [...n.attributes].some((a) => a.name.startsWith('on'))).length,
+    tableScrolls: [...previewEl.querySelectorAll('.pv-table')].some((w) => w.scrollWidth > w.clientWidth),
+    pageScrollsSideways: previewEl.scrollWidth > previewEl.clientWidth,
+    focused: document.activeElement === previewEl, scrollTop: Math.round(previewEl.scrollTop),
+  };
+}
+
+// Tests: where the last mouse press landed (coordinates and element class only, no text).
+let lastDown = null;
+addEventListener('mousedown', (e) => { lastDown = { x: e.clientX, y: e.clientY, cls: String(e.target && e.target.className || '').slice(0, 40) }; }, true);

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using FloatingMemo.Controls;
 using FloatingMemo.Editing;
 using FloatingMemo.Services;
@@ -178,7 +178,7 @@ public sealed partial class MainPage : Page
         _recorder = services.Recorder;
         _recorder.SourceFailed += OnSourceFailed;
         // Shortcut hints only while the mouse is over their button (never on keyboard focus).
-        foreach (var control in new FrameworkElement[] { NewNoteButton, NoteListButton, LinkButton, MinutesButton, MicToggle, MicDeviceButton, SystemAudioToggle, RecordButton })
+        foreach (var control in new FrameworkElement[] { NewNoteButton, NoteListButton, PreviewButton, LinkButton, MinutesButton, MicToggle, MicDeviceButton, SystemAudioToggle, RecordButton })
         {
             HoverToolTips.Adopt(control);
         }
@@ -253,6 +253,8 @@ public sealed partial class MainPage : Page
         editor.LinkRequested += (_, request) => DispatcherQueue.TryEnqueue(async () => await AskForLinkAsync(request.Text, request.Url, request.Existing));
         editor.OpenLinkRequested += (_, url) => DispatcherQueue.TryEnqueue(async () => await ConfirmOpenLinkAsync(url));
         editor.SetWrap(_services?.Preferences.WrapLines != false);
+        editor.PreviewChanged += (_, preview) => DispatcherQueue.TryEnqueue(() => UpdatePreviewButton(preview));
+        PreviewButton.Visibility = editor.Visual ? Visibility.Collapsed : Visibility.Visible;
         EditorDisplay.WrapChanged += (_, wrap) => DispatcherQueue.TryEnqueue(() => _markdownEditor?.SetWrap(wrap));
         // Typing or clicking in the memo closes any hover hint (the pointer may have left a
         // button straight into the editor, which is another window).
@@ -287,6 +289,7 @@ public sealed partial class MainPage : Page
         }
 
         _editor = _plainEditor;
+        UpdatePreviewButton(false);
         UpdateEditorVisibility();
         if (_workspace?.Active is { } note)
         {
@@ -328,6 +331,7 @@ public sealed partial class MainPage : Page
     private TextBlock? _testMirrorFocus;
     private TextBlock? _testMirrorKind;
     private TextBlock? _testMirrorTip;
+    private TextBlock? _testMirrorProbe;
     private TextBlock? _testMirrorLevels;
     private TextBlock? _testMirrorCaret;
     private bool _testEditorFocus;
@@ -347,6 +351,7 @@ public sealed partial class MainPage : Page
         _testMirrorFocus = Make("EditorFocusState");
         _testMirrorKind = Make("EditorKind");
         _testMirrorTip = Make("HoverTipState");
+        _testMirrorProbe = Make("EditorProbe");
         _testMirrorLevels = Make("LevelMirror");
         _testMirrorCaret = Make("EditorCaret");
 
@@ -401,6 +406,8 @@ public sealed partial class MainPage : Page
         AutomationProperties.SetName(_testMirrorText, (_workspace?.Active?.Text ?? string.Empty).Replace('\n', '\r'));
         AutomationProperties.SetName(_testMirrorKind!, web ? (_markdownEditor!.Visual ? "visual" : "web") : "plain");
         AutomationProperties.SetName(_testMirrorTip!, HoverToolTips.OpenText ?? "none");
+        AutomationProperties.SetName(_testMirrorProbe!, _markdownEditor?.ProbeResult ?? string.Empty);
+        _markdownEditor?.Probe();
         AutomationProperties.SetName(_testMirrorCaret!, _markdownEditor?.CaretColor ?? string.Empty);
         bool focused = web ? _testEditorFocus : XamlRoot is not null && ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), MemoTextBox);
         AutomationProperties.SetName(_testMirrorFocus!, focused ? "focused" : "blurred");
@@ -1259,7 +1266,7 @@ public sealed partial class MainPage : Page
             var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName), template) { Priority = priority }.GenerateAsync(transcript, sourceTitle, DateTime.Now,
                 minutesProgress, cts.Token, dictionary, noteId));
             draft.Run?.Append(DateTime.Now); // sizes, parts and finish reasons only (%TEMP%, not the note text)
-            var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), draft.Markdown);
+            var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), MinutesPresentation.ForReader(draft.Markdown));
             HandleSaveResult(saved);
             if (draft.Correction is { } correction)
             {
@@ -1762,6 +1769,32 @@ public sealed partial class MainPage : Page
                 ToggleWrap();
                 break;
         }
+    }
+
+    // ----- Display: edit ⇄ preview (Ctrl+E) ---------------------------------------------------
+
+    // One mode for every tab (not saved): switching tabs while reading keeps reading, and a
+    // restart always starts in the editor, where typing works at once.
+    private void OnPreviewClick(object sender, RoutedEventArgs e) => TogglePreview();
+
+    private void TogglePreview()
+    {
+        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && !_markdownEditor.Visual)
+        {
+            _markdownEditor.SetPreview(!_markdownEditor.IsPreview);
+        }
+        else
+        {
+            ShowStatus("プレビューは Markdown エディタで使えます");
+        }
+    }
+
+    private void UpdatePreviewButton(bool preview)
+    {
+        PreviewIcon.Glyph = preview ? "\uE70F" : "\uE890"; // pencil / eye
+        string name = preview ? "編集に戻る" : "プレビュー";
+        AutomationProperties.SetName(PreviewButton, name);
+        HoverToolTips.Set(PreviewButton, preview ? "編集に戻る (Ctrl+E)" : "プレビュー：読み取り専用で表示 (Ctrl+E)");
     }
 
     // ----- Display: line wrapping (Alt+Z), links (Ctrl+K) -----------------------------------------
