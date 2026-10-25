@@ -9,14 +9,17 @@
 
 import { EditorState, EditorSelection, Compartment, Prec, StateField, StateEffect } from './vendor/codemirror-state/dist/index.js';
 import { EditorView, keymap, Decoration, ViewPlugin, WidgetType, drawSelection, placeholder } from './vendor/codemirror-view/dist/index.js';
-import { history, historyKeymap, defaultKeymap, indentMore, indentLess, insertTab } from './vendor/codemirror-commands/dist/index.js';
+import { history, historyKeymap, defaultKeymap, indentMore, indentLess, insertTab, isolateHistory } from './vendor/codemirror-commands/dist/index.js';
 import { syntaxTree, indentUnit } from './vendor/codemirror-language/dist/index.js';
 import { markdown, markdownLanguage, insertNewlineContinueMarkup } from './vendor/codemirror-lang-markdown/dist/index.js';
 import { listDrag, listItems, moveSpec } from './listdrag.js';
 import { renderPreview } from './preview.js';
+import { patch, sameContent } from './mdpatch.js';
 
 const host = window.chrome && window.chrome.webview;
-const post = (message) => { if (host) host.postMessage(message); };
+const sent = [];   // without the app (development / tests in a browser): what would have been sent
+let lastCommand = null;   // tests: the last app command sent (its name only)
+const post = (message) => { if (message.type === 'command' || message.type === 'mode') lastCommand = `${message.type}:${message.name || message.mode}${message.refused ? `!${message.refused}` : ''}`; if (host) host.postMessage(message); else if (sent.push(message) > 200) sent.shift(); };
 
 // ----- Live preview ----------------------------------------------------------------------
 
@@ -519,6 +522,7 @@ const appKeymap = Prec.highest(keymap.of([
   { key: 'F6', run: command('focusOut') },
   { key: 'Mod-k', run: requestLink },
   { key: 'Mod-e', run: command('preview') },
+  { key: 'Ctrl-Alt-p', run: command('preview') },
   { key: 'Backspace', run: deleteAutoPair },
   { key: 'Mod-b', run: toggleWrap('**') },
   { key: 'Mod-i', run: toggleWrap('*') },
@@ -565,14 +569,17 @@ function onUpdate(update) {
   } else if (update.selectionSet) {
     post({ type: 'caret', id: currentId, caret: update.state.selection.main.head });
   }
-  if (update.focusChanged) post({ type: 'focus', focused: update.view.hasFocus });
-  if (previewOn && update.docChanged) schedulePreview();
+  // In the other modes the source editor is hidden: its late blur must not overrule their focus.
+  if (update.focusChanged && (mode === 'source' || update.view.hasFocus)) post({ type: 'focus', focused: update.view.hasFocus });
+  if (mode === 'preview' && update.docChanged) schedulePreview();
 }
 
-// Preview mode (see setPreview); declared before the view exists, which reads previewOn.
+// Modes (see setMode); declared before the view exists, which reads them.
 const editorEl = document.getElementById('editor');
+const visualEl = document.getElementById('visual');
 const previewEl = document.getElementById('preview');
-let previewOn = false;
+let mode = 'source';          // 'source' | 'visual' | 'preview'
+let lastEdit = 'source';      // the editing mode the preview goes back to
 let editorScroll = null;
 let previewTimer = 0;
 const view = new EditorView({ parent: editorEl, state: createState('', 0, false) });
@@ -585,6 +592,7 @@ function load(id, text, caret, isReadOnly) {
     pendingInsert = null;
     insertTranscriptNow(text0);
   }
+  if (mode === 'visual') syncFromVisual();     // the note being left gets the last visual edit
   if (currentId !== null) states.set(currentId, view.state);
   const saved = states.get(id);
   let state;
@@ -597,16 +605,21 @@ function load(id, text, caret, isReadOnly) {
   view.setState(state);
   view.dispatch({ effects: wrapping.reconfigure(wrapExtension()) }); // a kept state may have the other setting
   view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
-  if (previewOn) {
-    editorScroll = null;   // another note: back in the editor, show its caret
+  editorScroll = null;   // another note: back in the source mode, show its caret
+  if (mode === 'preview') {
     renderNow();
     previewEl.scrollTop = 0;
+  } else if (mode === 'visual') {
+    // The same mode for the next note when it can be shown without changing it.
+    if (!openVisual()) showMode('source', 'visual-note');
+    else visualEl.scrollTop = 0;
   }
 }
 
-// ----- Preview: the note rendered read-only (display only; the note is never changed) ------
-// The editor state (text, caret, selection, undo history) stays as it is underneath; the
-// preview is rebuilt from the current text, including edits not saved yet.
+// ----- Three modes: source (CodeMirror), visual (Milkdown), preview (read only) -------------
+// The note's text is always the source editor's document: the visual mode shows it and puts
+// only the lines an edit changed back into it (mdpatch.js); the preview renders it. Switching
+// modes never changes the text, never saves and never adds undo steps.
 
 function renderNow() {
   clearTimeout(previewTimer);
@@ -624,63 +637,252 @@ function schedulePreview() {
   }, 150);
 }
 
-function setPreview(on) {
-  // Never in the middle of an IME composition: the unfinished text would be lost.
-  if (on !== previewOn && !(on && view.composing)) {
-    const sc = view.scrollDOM;
-    if (on) {
-      editorScroll = sc.scrollTop;
-      const ratio = sc.scrollHeight > sc.clientHeight ? sc.scrollTop / (sc.scrollHeight - sc.clientHeight) : 0;
-      renderNow();
-      previewOn = true;
-      editorEl.hidden = true;
-      previewEl.hidden = false;
-      previewEl.scrollTop = Math.round(ratio * Math.max(0, previewEl.scrollHeight - previewEl.clientHeight));
-      previewEl.focus({ preventScroll: true });
-    } else {
-      previewOn = false;
-      clearTimeout(previewTimer);
-      previewTimer = 0;
-      previewEl.hidden = true;
-      previewEl.replaceChildren();
-      editorEl.hidden = false;
-      view.requestMeasure();
-      if (editorScroll === null) view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
-      else sc.scrollTop = editorScroll;
-      view.focus();
-    }
+let visual = null;            // the visual editor, loaded on first use
+let visualLoading = null;
+let visualBase = '';          // Milkdown's Markdown for the note's current text
+let visualNotice = false;
+
+function loadVisual() {
+  if (!visualLoading) {
+    visualLoading = import('./visualmode.js').then(({ createVisual }) => createVisual(visualEl, {
+      changed: (md) => applyVisualEdit(md),
+      requestLink: (text, url, existing) => post({ type: 'linkRequest', text, url, existing }),
+      openLink: (url) => post({ type: 'openLink', url }),
+    })).then((v) => { visual = v; return v; });
   }
-  post({ type: 'mode', preview: previewOn });
+  return visualLoading;
 }
 
-// Keys in the preview: the app's shortcuts still work; nothing edits the note from here.
-const previewKeys = { n: 'new', o: 'open', w: 'close', s: 'save', r: 'record', e: 'preview' };
-previewEl.addEventListener('keydown', (e) => {
-  let name = null;
-  if (e.key === 'Escape') name = 'hide';
-  else if (e.key === 'F6') name = 'focusOut';
-  else if (e.key === 'F2') name = 'rename';
-  else if (e.ctrlKey && e.key === 'Tab') name = e.shiftKey ? 'previous' : 'next';
-  else if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') name = 'reopen';
-  else if (e.ctrlKey && e.shiftKey && e.code === 'KeyE') name = 'export';
-  else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code.startsWith('Key')) name = previewKeys[e.code.slice(3).toLowerCase()] || null;
-  if (name) {
-    e.preventDefault();
-    post({ type: 'command', name });
-  } else if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('pv-link')) {
-    e.preventDefault();
-    post({ type: 'openLink', url: e.target.dataset.url });
+let visualNote = null;        // { id, text } the visual editor shows, to resume it unchanged
+
+function openVisual() {
+  const text = view.state.doc.toString();
+  if (visualNote && visualNote.id === currentId && visualNote.text === text && sameContent(visual.markdown(), text)) {
+    visual.resume(view.state.readOnly);   // nothing changed meanwhile: caret, selection, undo kept
+    return true;
   }
-});
-// A click on a link asks the host, which shows the address before opening anything.
+  const base = visual.open(text, view.state.readOnly);
+  if (base === null) { visualNote = null; return false; }
+  visualBase = base;
+  visualNote = { id: currentId, text };
+  // The caret where it was in the source: after the same words.
+  const words = sourceCaretText();
+  if (words) visual.placeCaret(words.needle, words.nth);
+  return true;
+}
+
+// The caret's position as text (markup left out), to find the same place in the other mode.
+function plain(s) { return s.replace(/[*_`~\[\]()<>|#]/g, ''); }
+function sourceCaretText() {
+  const { state } = view;
+  const head = state.selection.main.head;
+  const line = state.doc.lineAt(head);
+  const before = plain(line.text.slice(0, head - line.from).replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|^\s*>\s?|^\s*#{1,6}\s+/, '')).slice(-16);
+  if (before.trim() === '') return null;
+  const all = plain(state.sliceDoc(0, head));
+  return { needle: before, nth: all.split(before).length - 2 };
+}
+function placeSourceCaret(words) {
+  if (!words) return;
+  const text = view.state.doc.toString();
+  // Search the text without markup, then map back to the document.
+  const map = [];
+  let flat = '';
+  for (let i = 0; i < text.length; i++) { if (!/[*_`~\[\]()<>|#]/.test(text[i])) { map.push(i); flat += text[i]; } }
+  let at = -1, from = 0;
+  for (let k = 0; k <= words.nth; k++) { at = flat.indexOf(words.needle, from); if (at < 0) return; from = at + 1; }
+  const pos = map[at + words.needle.length - 1] + 1;
+  view.dispatch({ selection: EditorSelection.cursor(Math.min(pos, text.length)), scrollIntoView: true });
+}
+
+// An edit in the visual mode: only the changed lines go into the note (one source-editor change).
+function applyVisualEdit(md) {
+  if (mode !== 'visual' || md === visualBase) return;
+  const original = view.state.doc.toString();
+  // Safety: the visual editor must have been showing this very text. If the note changed some
+  // other way meanwhile, its edit is not written over the note: it is shown again from the note.
+  if (!visualNote || visualNote.id !== currentId || visualNote.text !== original) {
+    post({ type: 'notice', name: 'visual-reloaded' });
+    visualNote = null;
+    if (!openVisual()) showMode('source', 'visual-note');
+    return;
+  }
+  let next = patch(original, visualBase, md, (text) => sameContent(text, md));
+  if (next === null) {
+    next = md;   // could not be limited to the edited lines: the visual editor's text, never a lost edit
+    if (!visualNotice) { visualNotice = true; post({ type: 'notice', name: 'visual-rewrote' }); }
+  }
+  visualBase = md;
+  if (next === original) return;
+  let from = 0;
+  while (from < original.length && from < next.length && original[from] === next[from]) from++;
+  let end = 0;
+  while (end < original.length - from && end < next.length - from && original[original.length - 1 - end] === next[next.length - 1 - end]) end++;
+  view.dispatch({ changes: { from, to: original.length - end, insert: next.slice(from, next.length - end) }, userEvent: 'input.visual' });
+  visualNote = { id: currentId, text: next };
+}
+
+function syncFromVisual() {
+  if (visual) applyVisualEdit(visual.markdown());
+}
+
+const scrollerOf = (m) => (m === 'source' ? view.scrollDOM : m === 'visual' ? visualEl : previewEl);
+function ratioOf(el) { return el.scrollHeight > el.clientHeight ? el.scrollTop / (el.scrollHeight - el.clientHeight) : 0; }
+function setRatio(el, r) { el.scrollTop = Math.round(r * Math.max(0, el.scrollHeight - el.clientHeight)); }
+const composing = () => view.composing || (mode === 'visual' && visual !== null && visual.composing);
+
+function report(refused) { post({ type: 'mode', mode, lastEdit, ...(refused ? { refused } : {}) }); }
+
+// Changes what is shown; `refused` explains why the requested mode was not used.
+function showMode(next, refused) {
+  const from = mode;
+  const ratio = ratioOf(scrollerOf(from));
+  if (from === 'source') editorScroll = view.scrollDOM.scrollTop;
+  let caretWords = null;
+  if (from === 'visual' && visual) {
+    syncFromVisual();
+    caretWords = next === 'source' ? visual.caretText() : null;
+    visual.close();
+    visualNote = { id: currentId, text: view.state.doc.toString() };
+  }
+  if (from === 'preview') { clearTimeout(previewTimer); previewTimer = 0; previewEl.replaceChildren(); }
+  mode = next;
+  if (next !== 'preview') lastEdit = next;
+  editorEl.hidden = next !== 'source';
+  visualEl.hidden = next !== 'visual';
+  previewEl.hidden = next !== 'preview';
+  if (next === 'source') {
+    view.requestMeasure();
+    if (caretWords) placeSourceCaret(caretWords);
+    if (from === 'preview' && lastEditWas === 'source' && editorScroll !== null) view.scrollDOM.scrollTop = editorScroll;
+    else if (from !== 'source') setRatio(view.scrollDOM, ratio);
+    view.focus();
+  } else if (next === 'visual') {
+    setRatio(visualEl, ratio);
+    visual.focus();
+  } else {
+    lastEditWas = from;
+    renderNow();
+    setRatio(previewEl, ratio);
+    previewEl.focus({ preventScroll: true });
+  }
+  if (next !== 'source' && document.hasFocus()) post({ type: 'focus', focused: true });
+  report(refused);
+}
+let lastEditWas = 'source';
+
+let switching = Promise.resolve();
+function setMode(next) {
+  switching = switching.then(async () => {
+    if (next === 'previous') next = mode === 'preview' ? lastEdit : 'preview';
+    if (!['source', 'visual', 'preview'].includes(next) || next === mode) { report(); return; }
+    // Never in the middle of an IME composition: the unfinished text would be lost.
+    if (composing()) { report('composing'); return; }
+    if (next === 'visual') {
+      try { await loadVisual(); } catch { report('visual-unavailable'); return; }
+      if (!openVisual()) { report('visual-note'); return; }   // would change the note: stay
+    }
+    showMode(next);
+  }).catch(() => report('error'));   // a failed switch never blocks the next one
+  return switching;
+}
+
+// The letter key of a shortcut, by key position, or by key code when the position is not
+// reported (keys sent by some tools): never by the typed character, which depends on the IME.
+export function letter(e) {
+  if (e.code && e.code.startsWith('Key')) return e.code.slice(3).toLowerCase();
+  return e.keyCode >= 65 && e.keyCode <= 90 ? String.fromCharCode(e.keyCode + 32) : '';
+}
+
+// Keys outside the source editor: the app's shortcuts still work.
+const appKeys = { n: 'new', o: 'open', w: 'close', s: 'save', r: 'record' };
+function appKey(e) {
+  if (e.isComposing || composing()) return null;
+  if (e.key === 'Escape') return 'hide';
+  if (e.key === 'F6') return 'focusOut';
+  if (e.key === 'F2') return 'rename';
+  if (e.ctrlKey && e.key === 'Tab') return e.shiftKey ? 'previous' : 'next';
+  const k = letter(e);
+  if (e.ctrlKey && e.altKey && !e.shiftKey && k === 'p') return 'preview';
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && k === 'e') return 'preview';
+  if (e.ctrlKey && e.shiftKey && !e.altKey && k === 't') return 'reopen';
+  if (e.ctrlKey && e.shiftKey && !e.altKey && k === 'e') return 'export';
+  if (e.altKey && !e.ctrlKey && k === 'z') return 'wrap';
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && k) return appKeys[k] || null;
+  return null;
+}
+for (const el of [visualEl, previewEl]) {
+  el.addEventListener('keydown', (e) => {
+    const name = appKey(e);
+    if (name) {
+      e.preventDefault();
+      e.stopPropagation();
+      post({ type: 'command', name });
+    } else if (el === previewEl && e.key === 'Enter' && e.target.classList && e.target.classList.contains('pv-link')) {
+      e.preventDefault();
+      post({ type: 'openLink', url: e.target.dataset.url });
+    }
+  }, true);
+}
+// A click on a link in the preview asks the host, which shows the address before opening anything.
 previewEl.addEventListener('click', (e) => {
   const a = e.target.closest && e.target.closest('.pv-link');
   if (a) post({ type: 'openLink', url: a.dataset.url });
 });
+visualEl.addEventListener('compositionstart', () => post({ type: 'composition', active: true }));
+visualEl.addEventListener('compositionend', () => {
+  post({ type: 'composition', active: false });
+  if (pendingInsert !== null) {
+    const text = pendingInsert;
+    pendingInsert = null;
+    setTimeout(() => insertTranscript(text), 0);
+  }
+});
+for (const el of [visualEl, previewEl]) {
+  el.addEventListener('focusin', () => post({ type: 'focus', focused: true }));
+  // Only the shown mode reports losing focus (a hidden one blurs late, after the switch).
+  el.addEventListener('focusout', (e) => { if (mode === (el === visualEl ? 'visual' : 'preview') && (!e.relatedTarget || !el.contains(e.relatedTarget))) post({ type: 'focus', focused: false }); });
+}
+
+// ----- Tables: inserted at the caret ------------------------------------------------------------
+
+/** A GitHub table (a header row and rows - 1 empty rows), as its own block at the caret's line. */
+function insertTableSource(rows, cols) {
+  if (view.state.readOnly || view.composing) return;
+  const header = '| ' + Array.from({ length: cols }, (_, i) => `列${i + 1}`).join(' | ') + ' |';
+  const rule = '|' + '---|'.repeat(cols);
+  const empty = '|' + '  |'.repeat(cols);
+  const table = [header, rule, ...Array.from({ length: Math.max(1, rows - 1) }, () => empty)].join('\n');
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const blank = line.text.trim() === '';
+  const next = line.number < state.doc.lines ? state.doc.line(line.number + 1) : null;
+  // An empty line becomes the table; after a line with text the table follows it. A blank line
+  // separates it from text before and after, so neighbouring paragraphs are not joined.
+  const before = blank ? (line.number > 1 && state.doc.line(line.number - 1).text.trim() !== '' ? '\n' : '') : '\n\n';
+  const after = next && next.text.trim() !== '' ? '\n' : '';
+  const from = blank ? line.from : line.to;
+  const to = blank ? line.to : line.to;
+  const insert = before + table + after;
+  const cell = from + before.length + 2;   // the first header cell, selected so typing replaces it
+  view.dispatch({
+    changes: { from, to, insert },
+    selection: EditorSelection.range(cell, cell + `列1`.length),
+    userEvent: 'input.table',
+    annotations: isolateHistory.of('full'),   // its own undo step, never merged with typing
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+function insertTable(rows, cols) {
+  if (mode === 'source') insertTableSource(rows, cols);
+  else if (mode === 'visual' && visual && !view.state.readOnly && !visual.composing) visual.insertTable(rows, cols);
+}
 
 // Same rule as the C# TranscriptInsertion: the transcript becomes its own paragraph at the caret.
 function insertTranscript(text) {
-  if (view.composing) {
+  if (composing()) {
     // Several transcripts may arrive while composing: keep them all, in order.
     pendingInsert = pendingInsert === null ? text : pendingInsert + '\n\n' + text;
     return;
@@ -692,6 +894,7 @@ function insertTranscript(text) {
 // end of the note, after one empty line; the caret, the selection and the scroll position stay
 // as they are, so the user can keep writing where they were.
 function insertTranscriptNow(block) {
+  if (mode === 'visual') syncFromVisual();   // edits typed a moment ago come first
   const doc = view.state.doc;
   let trailing = 0;
   for (let i = doc.length - 1; i >= 0 && trailing < 2 && doc.sliceString(i, i + 1) === '\n'; i--) trailing++;
@@ -701,6 +904,12 @@ function insertTranscriptNow(block) {
     selection: view.state.selection,   // positions before the end are unaffected
     userEvent: 'input.transcript',
   });
+  if (mode === 'visual' && visual) {
+    // Shown at the end of the visual document too; the caret stays where it is.
+    visual.append(block);
+    visualBase = visual.markdown();
+    visualNote = { id: currentId, text: view.state.doc.toString() };
+  }
 }
 
 view.contentDOM.addEventListener('compositionstart', () => post({ type: 'composition', active: true }));
@@ -719,11 +928,18 @@ view.contentDOM.addEventListener('compositionend', (e) => {
 // Whenever the page receives focus (window shown, WebView focused by the host), put the caret
 // back into the editor. A focus request from the host can arrive before the page actually
 // has focus, in which case view.focus() alone would do nothing.
-window.addEventListener('focus', () => { if (previewOn) previewEl.focus({ preventScroll: true }); else if (!view.hasFocus) view.focus(); });
+window.addEventListener('focus', () => focusMode());
+function focusMode() {
+  if (mode === 'preview') previewEl.focus({ preventScroll: true });
+  else if (mode === 'visual' && visual) visual.focus();
+  else if (!view.hasFocus) view.focus();
+  // Focus already inside the visual editor or the preview fires no event: say so anyway.
+  if (mode !== 'source' && document.hasFocus()) post({ type: 'focus', focused: true });
+}
 
 // Alt+Z (wrap on/off) by key position: with Alt held, the key value depends on the layout and IME.
 document.addEventListener('keydown', (e) => {
-  if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyZ' && !view.composing) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && letter(e) === 'z' && !view.composing) {
     e.preventDefault();
     e.stopPropagation();
     post({ type: 'command', name: 'wrap' });
@@ -759,33 +975,39 @@ function handleHost(message) {
       if (isId(message.id)) states.delete(message.id);
       break;
     case 'focus':
-      if (previewOn) previewEl.focus({ preventScroll: true });
-      else view.focus();
+      focusMode();
       break;
     case 'mode':
-      if (typeof message.preview === 'boolean') setPreview(message.preview);
+      if (typeof message.mode === 'string') setMode(message.mode);
+      break;
+    case 'insertTable':
+      if (Number.isInteger(message.rows) && Number.isInteger(message.cols) && message.rows >= 2 && message.rows <= 50 && message.cols >= 1 && message.cols <= 20) insertTable(message.rows, message.cols);
       break;
     case 'options':
       if (typeof message.wrap === 'boolean' && message.wrap !== wrapOn) {
         wrapOn = message.wrap;
         view.dispatch({ effects: wrapping.reconfigure(wrapExtension()) });
       }
+      visualEl.classList.toggle('nowrap', !wrapOn);   // display only, as in the source mode
       break;
     case 'link':
-      requestLink(view);
+      if (mode === 'visual' && visual) visual.requestLink();
+      else if (mode === 'source') requestLink(view);
       break;
     case 'probe':
       // Tests only need where the list handles are (line numbers and coordinates, no text).
-      post({ type: 'probeResult', data: JSON.stringify({ dpr: devicePixelRatio, down: lastDown, preview: previewProbe(), handles: [...document.querySelectorAll('.cm-drag-handle')].map((h) => {
+      post({ type: 'probeResult', data: JSON.stringify({ dpr: devicePixelRatio, down: lastDown, key: lastShortcut, mode, composing: Boolean(composing()), lastCommand, preview: previewProbe(), visual: mode === 'visual' && visual ? visual.probe() : null, handles: [...document.querySelectorAll('.cm-drag-handle')].map((h) => {
         const b = h.getBoundingClientRect();
         return { line: Number(h.dataset.line), x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
       }) }) });
       break;
     case 'applyLink':
       if (typeof message.url === 'string' && message.url.length <= 2048 && typeof message.text === 'string' && message.text.length <= 1000) {
-        applyLink(message.text, message.url);
+        if (mode === 'visual' && visual) visual.applyLink(message.text, message.url);
+        else applyLink(message.text, message.url);
       } else {
         pendingLink = null;
+        if (visual) visual.cancelLink();
       }
       break;
     case 'theme':
@@ -816,7 +1038,7 @@ if (host) {
   host.addEventListener('message', (e) => handleHost(e.data));
 } else {
   // Opened in a normal browser for development (no app host): expose a handle for testing.
-  window.floatingMemoDebug = { view, load, handleHost, listItems, moveSpec, previewProbe };
+  window.floatingMemoDebug = { view, load, handleHost, listItems, moveSpec, previewProbe, sent, get mode() { return mode; }, get visual() { return visual; }, setMode };
 }
 // Tells the host which cursor colour is in effect (only a colour value; used by tests).
 function reportCaret() {
@@ -829,7 +1051,7 @@ reportCaret();
 
 // Tests: what the preview shows, as element counts only (no note text).
 function previewProbe() {
-  if (!previewOn) return null;
+  if (mode !== 'preview') return null;
   const count = (sel) => previewEl.querySelectorAll(sel).length;
   return {
     h: [1, 2, 3, 4, 5, 6].map((d) => count(`h${d}`)), strong: count('strong'), em: count('em'), del: count('del'),
@@ -848,4 +1070,7 @@ function previewProbe() {
 
 // Tests: where the last mouse press landed (coordinates and element class only, no text).
 let lastDown = null;
+// Tests: the last shortcut (key position and modifiers only; plain typing is not recorded).
+let lastShortcut = null;
+addEventListener('keydown', (e) => { if (e.ctrlKey || e.altKey) lastShortcut = { code: e.code || `keyCode ${e.keyCode}`, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, mode }; }, true);
 addEventListener('mousedown', (e) => { lastDown = { x: e.clientX, y: e.clientY, cls: String(e.target && e.target.className || '').slice(0, 40) }; }, true);

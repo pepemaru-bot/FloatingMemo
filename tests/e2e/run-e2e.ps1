@@ -75,6 +75,7 @@ $suites = [ordered]@{
     'editorux'      = @()
     'listdrag'      = @()
     'preview'       = @()
+    'modes'         = @()
     'integration'   = @('-LongSpeech', $long)
 }
 

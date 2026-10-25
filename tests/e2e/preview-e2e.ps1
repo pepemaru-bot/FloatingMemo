@@ -13,10 +13,10 @@ function Probe {
   }
   $null
 }
-# The button's name follows the mode the page reports (the probe mirror can be a tick behind).
+# The mode switch shows the mode the page confirmed (the probe mirror can be a tick behind).
 function WaitMode([bool]$preview) {
-  $name = if ($preview) { '編集に戻る' } else { 'プレビュー' }
-  for ($i = 0; $i -lt 30 -and -not (Find $name -ByName); $i++) { Start-Sleep -Milliseconds 200 }
+  $name = if ($preview) { 'プレビュー' } else { 'ソース編集' }
+  for ($i = 0; $i -lt 30 -and (Find 'ModeSwitch').Current.ItemStatus -ne $name; $i++) { Start-Sleep -Milliseconds 200 }
   for ($i = 0; $i -lt 15; $i++) {
     Start-Sleep -Milliseconds 200
     $p = Probe
@@ -59,10 +59,10 @@ try {
   SafeKeys 0x11, 0x23            # Ctrl+End
   SafeKeys 0x0D; SafeType "追記"
   $edited = $note + "`n追記"
-  Invoke-Button "プレビュー"
+  (Find 'PreviewModeButton').GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
   $p = WaitMode $true
   Check "preview button shows the rendered note" ($p -and $p.preview) ($p | ConvertTo-Json -Compress)
-  Check "button now says 編集に戻る" ($null -ne (Find '編集に戻る' -ByName))
+  Check "the preview button shows as current" ((Find 'PreviewModeButton').GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -eq 'On')
   if ($p.preview) {
     $v = $p.preview
     Check "table rendered with header and cells" ($v.tables -eq 1 -and $v.th -eq 3 -and $v.td -eq 3 -and $v.cellStrong -eq 1 -and $v.cellLinks -eq 1) ($v | ConvertTo-Json -Compress)
@@ -75,8 +75,8 @@ try {
 
   # Twenty-one more switches (ending in the editor): the Markdown stays byte for byte the same.
   for ($i = 0; $i -lt 21; $i++) {
-    $name = if ($i % 2 -eq 0) { '編集に戻る' } else { 'プレビュー' }
-    Invoke-Button $name
+    $id = if ($i % 2 -eq 0) { 'SourceModeButton' } else { 'PreviewModeButton' }
+    (Find $id).GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
     [void](WaitMode ($i % 2 -eq 1))
   }
   $p = WaitMode $false

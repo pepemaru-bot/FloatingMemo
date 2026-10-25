@@ -224,6 +224,9 @@
         <!-- Ctrl+R starts/stops recording without leaving the keyboard. -->
         <KeyboardAccelerator Key="R" Modifiers="Control" Invoked="OnRecordAcceleratorInvoked" />
         <KeyboardAccelerator Key="Z" Modifiers="Menu" Invoked="OnWrapAcceleratorInvoked" />
+        <!-- Ctrl+Alt+P: preview ⇄ the last editing mode (Alt combinations may not reach the page). -->
+        <KeyboardAccelerator Key="P" Modifiers="Control,Menu" Invoked="OnPreviewAcceleratorInvoked" />
+        <KeyboardAccelerator Key="E" Modifiers="Control" Invoked="OnPreviewAcceleratorInvoked" />
         <!-- Note/tab commands (see OnNoteCommand). -->
         <KeyboardAccelerator Key="N" Modifiers="Control" Invoked="OnNoteCommand" />
         <KeyboardAccelerator Key="W" Modifiers="Control" Invoked="OnNoteCommand" />
@@ -488,19 +491,109 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Edit/preview (Ctrl+E), link (Ctrl+K) and AI minutes (local LLM). -->
+            <!-- Mode (source | visual | preview), table, link (Ctrl+K) and AI minutes (local LLM). -->
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+            <!-- One mode at a time; the current one is filled with the accent colour. -->
+            <Border
+                x:Name="ModeSwitch"
+                Padding="1"
+                VerticalAlignment="Center"
+                BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                AutomationProperties.AutomationId="ModeSwitch"
+                AutomationProperties.Name="表示モード">
+                <StackPanel Orientation="Horizontal" Spacing="1">
+                    <ToggleButton
+                        x:Name="SourceModeButton"
+                        Width="30"
+                        Height="28"
+                        Padding="0"
+                        AllowFocusOnInteraction="False"
+                        AutomationProperties.AutomationId="SourceModeButton"
+                        AutomationProperties.Name="ソース編集"
+                        Click="OnModeClick"
+                        IsChecked="True"
+                        Tag="source"
+                        ToolTipService.ToolTip="ソース編集：Markdown を直接編集">
+                        <FontIcon FontSize="13" Glyph="&#xE943;" />
+                    </ToggleButton>
+                    <ToggleButton
+                        x:Name="VisualModeButton"
+                        Width="30"
+                        Height="28"
+                        Padding="0"
+                        AllowFocusOnInteraction="False"
+                        AutomationProperties.AutomationId="VisualModeButton"
+                        AutomationProperties.Name="ビジュアル編集"
+                        Click="OnModeClick"
+                        Tag="visual"
+                        ToolTipService.ToolTip="ビジュアル編集：見たままの形で編集">
+                        <FontIcon FontSize="13" Glyph="&#xE70F;" />
+                    </ToggleButton>
+                    <ToggleButton
+                        x:Name="PreviewModeButton"
+                        Width="30"
+                        Height="28"
+                        Padding="0"
+                        AllowFocusOnInteraction="False"
+                        AutomationProperties.AutomationId="PreviewModeButton"
+                        AutomationProperties.Name="プレビュー"
+                        Click="OnModeClick"
+                        Tag="preview"
+                        ToolTipService.ToolTip="プレビュー：読み取り専用で表示 (Ctrl+Alt+P で切り替え)">
+                        <FontIcon FontSize="13" Glyph="&#xE890;" />
+                    </ToggleButton>
+                </StackPanel>
+            </Border>
             <Button
-                x:Name="PreviewButton"
+                x:Name="TableButton"
                 Width="34"
                 Height="32"
                 Padding="0"
                 AllowFocusOnInteraction="False"
-                AutomationProperties.AutomationId="PreviewButton"
-                AutomationProperties.Name="プレビュー"
-                Click="OnPreviewClick"
-                ToolTipService.ToolTip="プレビュー：読み取り専用で表示 (Ctrl+E)">
-                <FontIcon x:Name="PreviewIcon" FontSize="14" Glyph="&#xE890;" />
+                AutomationProperties.AutomationId="TableButton"
+                AutomationProperties.Name="表を挿入"
+                ToolTipService.ToolTip="表を挿入">
+                <FontIcon FontSize="14" Glyph="&#xE80A;" />
+                <Button.Flyout>
+                    <Flyout x:Name="TableFlyout" Placement="TopEdgeAlignedRight" Opening="OnTableFlyoutOpening">
+                        <StackPanel Spacing="8" MinWidth="200">
+                            <TextBlock Style="{ThemeResource BodyStrongTextBlockStyle}" Text="表を挿入（列 × 行、見出し行を含む）" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Button AutomationProperties.AutomationId="Table2x2" Click="OnTablePresetClick" Content="2 × 2" Tag="2,2" />
+                                <Button AutomationProperties.AutomationId="Table3x3" Click="OnTablePresetClick" Content="3 × 3" Tag="3,3" />
+                                <Button AutomationProperties.AutomationId="Table4x4" Click="OnTablePresetClick" Content="4 × 4" Tag="4,4" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <NumberBox
+                                    x:Name="TableColsBox"
+                                    Width="86"
+                                    AutomationProperties.AutomationId="TableColsBox"
+                                    Header="列"
+                                    Maximum="20"
+                                    Minimum="1"
+                                    SpinButtonPlacementMode="Compact"
+                                    Value="3" />
+                                <NumberBox
+                                    x:Name="TableRowsBox"
+                                    Width="86"
+                                    AutomationProperties.AutomationId="TableRowsBox"
+                                    Header="行"
+                                    Maximum="50"
+                                    Minimum="2"
+                                    SpinButtonPlacementMode="Compact"
+                                    Value="3" />
+                            </StackPanel>
+                            <Button
+                                HorizontalAlignment="Stretch"
+                                AutomationProperties.AutomationId="TableInsertButton"
+                                Click="OnTableInsertClick"
+                                Content="挿入"
+                                Style="{ThemeResource AccentButtonStyle}" />
+                        </StackPanel>
+                    </Flyout>
+                </Button.Flyout>
             </Button>
             <Button
                 x:Name="LinkButton"

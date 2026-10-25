@@ -127,14 +127,14 @@
             <ToggleSwitch
                 x:Name="VisualToggle"
                 AutomationProperties.AutomationId="VisualToggle"
-                Header="編集の方式（再起動後に反映）"
-                OffContent="Markdown ソースで編集（標準）"
-                OnContent="ビジュアル編集（試験的）"
+                Header="起動したときの編集モード"
+                OffContent="ソース編集（Markdown を直接編集）"
+                OnContent="ビジュアル編集（見たままの形で編集）"
                 Toggled="OnVisualToggled" />
             <TextBlock
                 FontSize="12"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="ビジュアル編集では、表やチェックリストを見たまま編集できます。見たまま編集で形が変わる書き方を含むノートは、Markdown のテキストのまま表示します。開いただけではノートを書き換えません。"
+                Text="モードはメモ下部の「ソース｜ビジュアル｜プレビュー」でいつでも切り替えられます（再起動は不要、Ctrl+Alt+P でプレビュー）。切り替えてもノートの文字は変わりません。ビジュアル編集で書き方が変わる記法を含むノートは、ソース編集のまま表示します。"
                 TextWrapping="Wrap" />
         </StackPanel>
 

@@ -3,7 +3,8 @@
 
 # Experimental visual editing (Milkdown) inside the real app.
 # Not covered here (needs a person): the Japanese IME itself, and clicking checkboxes with the mouse.
-# Transcript insertion while typing is checked in the browser (visual.js keeps unreported keystrokes).
+# Since v0.8 the visual mode is one of three modes of the same page (see modes-e2e.ps1); this
+# suite covers the start-up setting and the visual editor with real notes.
 
 $settingsFile = Join-Path (Split-Path $NotesDir) 'e2e-settings.json'
 function Text { (Value) -replace "`r", "`n" }
@@ -73,7 +74,7 @@ try {
   Start-Sleep 2
   Check "unusual note opens unchanged" ((FileText) -eq $unusual) (Esc (FileText))
   SafeKeys 0x11, 0x23; SafeType "追記"; Start-Sleep 2
-  Check "editing it as text keeps every byte" ((FileText) -eq ($unusual + "追記")) (Esc (FileText))
+  Check "editing it keeps every other byte (setext heading, two-space break, 1) marker)" ((FileText) -eq $unusual.Replace("括弧つき番号", "括弧つき番号追記")) (Esc (FileText))
 
   # --- The setting can be switched off in the settings window --------------------------------------
   $win = $null
@@ -101,7 +102,7 @@ try {
 
   Restart
   Check "source editor back after a restart" ((EditorKind) -eq 'web') (EditorKind)
-  Check "note still intact" ((FileText) -eq ($unusual + "追記")) (Esc (FileText))
+  Check "note still intact" ((FileText) -eq $unusual.Replace("括弧つき番号", "括弧つき番号追記")) (Esc (FileText))
   CloseWindow
   Check "app exits at the end" (WaitExit 20)
 }

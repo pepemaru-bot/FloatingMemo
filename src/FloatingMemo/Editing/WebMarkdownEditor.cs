@@ -25,19 +25,18 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     private const int MaxTextLength = 20_000_000;
     private readonly Uri _editorUri;
 
-    /// <summary>The page in use: editor.html (Markdown source, CodeMirror) or visual.html (experimental, Milkdown).</summary>
-    public bool Visual { get; }
+    /// <summary>True while the note is edited in the visual mode (Milkdown).</summary>
+    public bool Visual => Mode == "visual";
 
     private readonly WebView2 _webView;
     private readonly HashSet<string> _knownNotes = new(StringComparer.Ordinal);
     private TaskCompletionSource? _flush;
     private string? _noteId;
 
-    private WebMarkdownEditor(WebView2 webView, bool visual)
+    private WebMarkdownEditor(WebView2 webView)
     {
         _webView = webView;
-        Visual = visual;
-        _editorUri = new Uri($"https://{HostName}/{(visual ? "visual.html" : "editor.html")}");
+        _editorUri = new Uri($"https://{HostName}/editor.html");
     }
 
     public event EventHandler<EditorTextChange>? TextChanged;
@@ -81,11 +80,10 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     internal static string UserDataFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FloatingMemo", "WebView2");
 
-    public static async Task<WebMarkdownEditor?> CreateAsync(WebView2 webView, string userDataFolder, string? theme, string? paper = null, bool visual = false)
+    public static async Task<WebMarkdownEditor?> CreateAsync(WebView2 webView, string userDataFolder, string? theme, string? paper = null)
     {
         string editorFolder = Path.Combine(AppContext.BaseDirectory, "Editor");
-        visual = visual && File.Exists(Path.Combine(editorFolder, "visual.html"));
-        if (!File.Exists(Path.Combine(editorFolder, visual ? "visual.html" : "editor.html")))
+        if (!File.Exists(Path.Combine(editorFolder, "editor.html")))
         {
             return null;
         }
@@ -107,7 +105,7 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             var environment = await CreateEnvironmentAsync(userDataFolder);
             await webView.EnsureCoreWebView2Async(environment);
 
-            var editor = new WebMarkdownEditor(webView, visual);
+            var editor = new WebMarkdownEditor(webView);
             var ready = new TaskCompletionSource();
             editor._theme = theme;
             editor._paper = paper;
@@ -181,9 +179,9 @@ internal sealed class WebMarkdownEditor : IMemoEditor
             {
                 PostTheme();
                 Post(new JsonObject { ["type"] = "options", ["wrap"] = _wrap });
-                if (_preview)
+                if (Mode != "source")
                 {
-                    Post(new JsonObject { ["type"] = "mode", ["preview"] = true });
+                    Post(new JsonObject { ["type"] = "mode", ["mode"] = Mode }); // after a page restart
                 }
 
                 ready.TrySetResult();
@@ -212,27 +210,29 @@ internal sealed class WebMarkdownEditor : IMemoEditor
         Post(new JsonObject { ["type"] = "options", ["wrap"] = wrap });
     }
 
-    private bool _preview;
+    /// <summary>"source" (Markdown, CodeMirror), "visual" (Milkdown) or "preview" (read only).</summary>
+    public string Mode { get; private set; } = "source";
 
-    /// <summary>True while the note is shown rendered and read-only (the source editor only).</summary>
-    public bool IsPreview => _preview;
-
-    /// <summary>The page switched between editing and the preview (it may refuse, e.g. while the IME composes).</summary>
-    public event EventHandler<bool>? PreviewChanged;
+    /// <summary>The editing mode the preview returns to.</summary>
+    public string LastEditMode { get; private set; } = "source";
 
     /// <summary>
-    /// Edit ⇄ preview. Display only: the page keeps the note's text, caret, selection and undo
-    /// history and renders a read-only view of the current text; nothing is saved or changed.
+    /// The page changed modes, or refused (Refused: "composing", "visual-note" — the visual editor
+    /// would change how the note is written —, "visual-unavailable"; null when switched).
     /// </summary>
-    public void SetPreview(bool preview)
-    {
-        if (Visual)
-        {
-            return;
-        }
+    public event EventHandler<(string Mode, string? Refused)>? ModeChanged;
 
-        Post(new JsonObject { ["type"] = "mode", ["preview"] = preview });
-    }
+    /// <summary>The visual mode had to write the whole note its own way once (content unchanged).</summary>
+    public event EventHandler<string>? Notice;
+
+    /// <summary>
+    /// Switches modes ("source", "visual", "preview", or "previous": preview ⇄ the last editing
+    /// mode). Display only: the note's text, caret, selection and undo history stay; nothing is saved.
+    /// </summary>
+    public void SetMode(string mode) => Post(new JsonObject { ["type"] = "mode", ["mode"] = mode });
+
+    /// <summary>A table (rows include the header row) at the caret, in the source or visual mode.</summary>
+    public void InsertTable(int rows, int cols) => Post(new JsonObject { ["type"] = "insertTable", ["rows"] = rows, ["cols"] = cols });
 
     /// <summary>Tests: asks the page where the list handles are (see <see cref="ProbeResult"/>).</summary>
     public void Probe() => Post(new JsonObject { ["type"] = "probe" });
@@ -315,14 +315,22 @@ internal sealed class WebMarkdownEditor : IMemoEditor
                     Str(message, "url") is { Length: <= 2048 } u ? u : string.Empty, message["existing"]?.GetValueKind() == JsonValueKind.True));
                 break;
             case "mode":
-                if (message["preview"] is JsonValue modeValue && modeValue.TryGetValue(out bool preview))
+                if (Str(message, "mode") is "source" or "visual" or "preview" && Str(message, "mode") is { } mode)
                 {
-                    bool changed = preview != _preview;
-                    _preview = preview;
-                    if (changed)
+                    Mode = mode;
+                    if (Str(message, "lastEdit") is "source" or "visual" && Str(message, "lastEdit") is { } last)
                     {
-                        PreviewChanged?.Invoke(this, preview);
+                        LastEditMode = last;
                     }
+
+                    ModeChanged?.Invoke(this, (mode, Str(message, "refused") is { Length: <= 40 } refused ? refused : null));
+                }
+
+                break;
+            case "notice":
+                if (Str(message, "name") is "visual-rewrote" or "visual-reloaded" && Str(message, "name") is { } notice)
+                {
+                    Notice?.Invoke(this, notice);
                 }
 
                 break;

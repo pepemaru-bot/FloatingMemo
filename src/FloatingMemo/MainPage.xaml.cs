@@ -178,7 +178,7 @@ public sealed partial class MainPage : Page
         _recorder = services.Recorder;
         _recorder.SourceFailed += OnSourceFailed;
         // Shortcut hints only while the mouse is over their button (never on keyboard focus).
-        foreach (var control in new FrameworkElement[] { NewNoteButton, NoteListButton, PreviewButton, LinkButton, MinutesButton, MicToggle, MicDeviceButton, SystemAudioToggle, RecordButton })
+        foreach (var control in new FrameworkElement[] { NewNoteButton, NoteListButton, SourceModeButton, VisualModeButton, PreviewModeButton, TableButton, LinkButton, MinutesButton, MicToggle, MicDeviceButton, SystemAudioToggle, RecordButton })
         {
             HoverToolTips.Adopt(control);
         }
@@ -240,7 +240,7 @@ public sealed partial class MainPage : Page
         // The body is white paper in light and dark mode alike, so the editor uses its light
         // colors (dark text, dark cursor). In high contrast the page follows the system colors.
         var (theme, paper) = EditorColors();
-        var editor = await WebMarkdownEditor.CreateAsync(EditorWebView, userData, theme, paper, visual: _services?.Preferences.VisualEditor == true);
+        var editor = await WebMarkdownEditor.CreateAsync(EditorWebView, userData, theme, paper);
         if (editor is null)
         {
             UpdateTestMirrors();
@@ -253,8 +253,15 @@ public sealed partial class MainPage : Page
         editor.LinkRequested += (_, request) => DispatcherQueue.TryEnqueue(async () => await AskForLinkAsync(request.Text, request.Url, request.Existing));
         editor.OpenLinkRequested += (_, url) => DispatcherQueue.TryEnqueue(async () => await ConfirmOpenLinkAsync(url));
         editor.SetWrap(_services?.Preferences.WrapLines != false);
-        editor.PreviewChanged += (_, preview) => DispatcherQueue.TryEnqueue(() => UpdatePreviewButton(preview));
-        PreviewButton.Visibility = editor.Visual ? Visibility.Collapsed : Visibility.Visible;
+        editor.ModeChanged += (_, change) => DispatcherQueue.TryEnqueue(() => OnEditorModeChanged(change.Mode, change.Refused));
+        editor.Notice += (_, notice) => DispatcherQueue.TryEnqueue(() => ShowStatus(notice == "visual-reloaded"
+            ? "ノートが別の操作で変わったため、ビジュアル編集を表示し直しました"
+            : "ビジュアル編集で、このノートの書き方（記号・字下げ）が整えられました。内容は変わっていません"));
+        UpdateModeButtons("source");
+        if (_services?.Preferences.VisualEditor == true)
+        {
+            editor.SetMode("visual"); // the editing mode chosen in the settings for the start
+        }
         EditorDisplay.WrapChanged += (_, wrap) => DispatcherQueue.TryEnqueue(() => _markdownEditor?.SetWrap(wrap));
         // Typing or clicking in the memo closes any hover hint (the pointer may have left a
         // button straight into the editor, which is another window).
@@ -289,7 +296,7 @@ public sealed partial class MainPage : Page
         }
 
         _editor = _plainEditor;
-        UpdatePreviewButton(false);
+        UpdateModeButtons(null);
         UpdateEditorVisibility();
         if (_workspace?.Active is { } note)
         {
@@ -1768,33 +1775,127 @@ public sealed partial class MainPage : Page
             case "wrap":
                 ToggleWrap();
                 break;
+            case "preview":
+                SetEditorMode("previous");
+                break;
         }
     }
 
-    // ----- Display: edit ⇄ preview (Ctrl+E) ---------------------------------------------------
+    // ----- Display: source | visual | preview (Ctrl+Alt+P: preview ⇄ the last editing mode) ----
 
-    // One mode for every tab (not saved): switching tabs while reading keeps reading, and a
-    // restart always starts in the editor, where typing works at once.
-    private void OnPreviewClick(object sender, RoutedEventArgs e) => TogglePreview();
-
-    private void TogglePreview()
+    // One mode for every tab, switched at once (no restart, nothing saved or changed): the page
+    // keeps the note's text, caret, selection and undo history and only shows it differently.
+    private void OnModeClick(object sender, RoutedEventArgs e)
     {
-        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && !_markdownEditor.Visual)
+        if (sender is ToggleButton { Tag: string mode })
         {
-            _markdownEditor.SetPreview(!_markdownEditor.IsPreview);
+            SetEditorMode(mode);
+            // The buttons show the page's actual mode, which arrives a moment later.
+            UpdateModeButtons(_markdownEditor?.Mode);
+            // Keyboard back in the note (a button operated by keyboard or UI Automation takes focus).
+            if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor))
+            {
+                _markdownEditor.Focus();
+            }
+        }
+    }
+
+    // The page and the window can both see one Ctrl+Alt+P: a second toggle right after is the same key press.
+    private DateTime _lastPreviewToggle = DateTime.MinValue;
+
+    private void OnPreviewAcceleratorInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        SetEditorMode("previous");
+    }
+
+    private void SetEditorMode(string mode)
+    {
+        if (mode == "previous")
+        {
+            if (DateTime.UtcNow - _lastPreviewToggle < TimeSpan.FromMilliseconds(400))
+            {
+                return;
+            }
+
+            _lastPreviewToggle = DateTime.UtcNow;
+        }
+
+        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor))
+        {
+            _markdownEditor.SetMode(mode);
         }
         else
         {
-            ShowStatus("プレビューは Markdown エディタで使えます");
+            ShowStatus("表示モードの切り替えは Markdown エディタで使えます");
         }
     }
 
-    private void UpdatePreviewButton(bool preview)
+    private void OnEditorModeChanged(string mode, string? refused)
     {
-        PreviewIcon.Glyph = preview ? "\uE70F" : "\uE890"; // pencil / eye
-        string name = preview ? "編集に戻る" : "プレビュー";
-        AutomationProperties.SetName(PreviewButton, name);
-        HoverToolTips.Set(PreviewButton, preview ? "編集に戻る (Ctrl+E)" : "プレビュー：読み取り専用で表示 (Ctrl+E)");
+        UpdateModeButtons(mode);
+        switch (refused)
+        {
+            case "visual-note":
+                ShowStatus("このノートにはビジュアル編集で書き方が変わる記法（参照形式のリンクなど）があるため、ソース編集のままにしています。内容は変わっていません");
+                break;
+            case "composing":
+                ShowStatus("日本語の変換中は切り替えません。確定してからもう一度押してください");
+                break;
+            case "visual-unavailable":
+                ShowStatus("ビジュアル編集を読み込めませんでした。ソース編集を使ってください");
+                break;
+        }
+    }
+
+    /// <summary>The current mode filled in; null = the plain fallback editor (no modes).</summary>
+    private void UpdateModeButtons(string? mode)
+    {
+        SourceModeButton.IsChecked = mode is "source" or null;
+        VisualModeButton.IsChecked = mode == "visual";
+        PreviewModeButton.IsChecked = mode == "preview";
+        ModeSwitch.Visibility = mode is null ? Visibility.Collapsed : Visibility.Visible;
+        bool editable = mode is "source" or "visual";
+        TableButton.IsEnabled = editable;
+        LinkButton.IsEnabled = editable || mode is null;
+        AutomationProperties.SetItemStatus(ModeSwitch, mode switch { "visual" => "ビジュアル編集", "preview" => "プレビュー", _ => "ソース編集" });
+    }
+
+    // ----- Tables ------------------------------------------------------------------------------
+
+    private void OnTableFlyoutOpening(object? sender, object e)
+    {
+        TableColsBox.Value = double.IsNaN(TableColsBox.Value) ? 3 : TableColsBox.Value;
+        TableRowsBox.Value = double.IsNaN(TableRowsBox.Value) ? 3 : TableRowsBox.Value;
+    }
+
+    private void OnTablePresetClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string size } && size.Split(',') is [var c, var r])
+        {
+            InsertTable(int.Parse(r, System.Globalization.CultureInfo.InvariantCulture), int.Parse(c, System.Globalization.CultureInfo.InvariantCulture));
+        }
+    }
+
+    private void OnTableInsertClick(object sender, RoutedEventArgs e)
+    {
+        int cols = double.IsNaN(TableColsBox.Value) ? 3 : (int)Math.Clamp(TableColsBox.Value, 1, 20);
+        int rows = double.IsNaN(TableRowsBox.Value) ? 3 : (int)Math.Clamp(TableRowsBox.Value, 2, 50);
+        InsertTable(rows, cols);
+    }
+
+    private void InsertTable(int rows, int cols)
+    {
+        TableFlyout.Hide();
+        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && _markdownEditor.Mode != "preview")
+        {
+            _markdownEditor.InsertTable(rows, cols);
+            _markdownEditor.Focus();
+        }
+        else
+        {
+            ShowStatus("表はソース編集かビジュアル編集で挿入できます");
+        }
     }
 
     // ----- Display: line wrapping (Alt+Z), links (Ctrl+K) -----------------------------------------
@@ -1826,7 +1927,7 @@ public sealed partial class MainPage : Page
 
     private void OnLinkClick(object sender, RoutedEventArgs e)
     {
-        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && !_markdownEditor.Visual)
+        if (_markdownEditor is not null && ReferenceEquals(_editor, _markdownEditor) && _markdownEditor.Mode != "preview")
         {
             _markdownEditor.RequestLink();
         }
