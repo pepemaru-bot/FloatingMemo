@@ -1869,6 +1869,9 @@ public sealed partial class MainPage : Page
         TableRowsBox.Value = double.IsNaN(TableRowsBox.Value) ? 3 : TableRowsBox.Value;
     }
 
+    // Keyboard into the picker (the note keeps it otherwise): the column box, ready to type.
+    private void OnTableFlyoutOpened(object? sender, object e) => TableColsBox.Focus(FocusState.Programmatic);
+
     private void OnTablePresetClick(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string size } && size.Split(',') is [var c, var r])

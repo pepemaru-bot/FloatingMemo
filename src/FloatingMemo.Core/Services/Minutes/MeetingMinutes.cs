@@ -221,10 +221,11 @@ public sealed partial class MinutesGenerator
             // after the last one the answer used are asked about again (a few times at most).
             IReadOnlyList<SourceUnit> context = FactMinutes.ContextBefore(parts, i);
             var pending = parts[i].ToList();
+            string known = FactPrompt.Known(KnownTopics(facts), CurrentTopic(facts, units));
             for (int round = 0; pending.Count > 0 && round <= FactMinutes.MaxContinuations; round++)
             {
                 string answer = await model.CompleteAsync(FactPrompt.System,
-                    round == 0 ? FactPrompt.User(context, pending, i, parts.Count) : FactPrompt.Continue(context, pending),
+                    round == 0 ? FactPrompt.User(context, pending, i, parts.Count, known: known) : FactPrompt.Continue(context, pending, known),
                     FactPrompt.MaxAnswerTokens, cancellationToken, generated).ConfigureAwait(false);
                 var allowed = pending.Select(u => u.Id).ToHashSet();
                 var parsed = FactMinutes.Parse(answer, out int bad);
@@ -248,6 +249,27 @@ public sealed partial class MinutesGenerator
         }
 
 
+        // Topic names so far (in order of appearance) and the topic of the latest statement used.
+        static List<string> KnownTopics(List<Fact> found) =>
+            found.Select(f => f.Topic.Trim()).Where(t => t.Length > 0).Distinct().ToList();
+        static string? CurrentTopic(List<Fact> found, List<SourceUnit> all)
+        {
+            var order = all.Select((u, n) => (u.Id, n)).ToDictionary(x => x.Id, x => x.n);
+            return found.Where(f => f.Topic.Length > 0 && f.Sources.Any(order.ContainsKey))
+                .OrderByDescending(f => f.Sources.Where(order.ContainsKey).Max(s => order[s]))
+                .Select(f => f.Topic).FirstOrDefault();
+        }
+
+        // The topic of the last fact before a statement, in meeting order.
+        static string? TopicBefore(List<Fact> found, List<SourceUnit> all, SourceUnit unit)
+        {
+            var order = all.Select((u, n) => (u.Id, n)).ToDictionary(x => x.Id, x => x.n);
+            int at = order.GetValueOrDefault(unit.Id, -1);
+            return found.Where(f => f.Topic.Length > 0 && f.Sources.Any(s => order.TryGetValue(s, out int n) && n < at))
+                .OrderByDescending(f => f.Sources.Where(order.ContainsKey).Max(s => order[s]))
+                .Select(f => f.Topic).FirstOrDefault();
+        }
+
         // Facts only from the parts' context lines, or only from "次に予算です"-like remarks, are
         // dropped; every step is written to the trace.
         IEnumerable<Fact> Accept(IEnumerable<Fact> parsed, ISet<string> allowed, string pass)
@@ -263,6 +285,10 @@ public sealed partial class MinutesGenerator
                 else if (FactMinutes.OnlyProcedural(f, byId))
                 {
                     trace.Add($"{pass}-dropped", f, "進行だけの発言");
+                }
+                else if (FactMinutes.OnlyVague(f, byId))
+                {
+                    trace.Add($"{pass}-dropped", f, "中身のない発言だけが根拠");
                 }
                 else
                 {
@@ -285,7 +311,13 @@ public sealed partial class MinutesGenerator
         var uncovered = FactMinutes.UncoveredClauses(units, facts, speed);
         var recovery = FactMinutes.RecoveryRanges(units, facts, criticalOnly: speed)
             .Select(r => r.Select(u => uncovered.TryGetValue(u.Id, out string? words) ? u with { Text = words } : u).ToList()).ToList();
-        var recoveryBatches = FactMinutes.RecoveryBatches(units, recovery.Take(FactMinutes.MaxRecoveryRanges).ToList(), tokens);
+        // The most important ranges first (tasks, decisions, dates, "not decided"), in meeting order
+        // within each rank: taking the first ranges in meeting order let talk early in a long
+        // meeting use up the requests, and its last subjects were never read again.
+        // Small requests when quality comes first: a small model answers sparsely when many
+        // ranges come at once (measured: 6 facts for 15 statements in one request).
+        var recoveryBatches = FactMinutes.RecoveryBatches(units, FactMinutes.ByImportance(recovery).Take(FactMinutes.MaxRecoveryRanges).ToList(), tokens,
+            speed ? 1500 : FactMinutes.QualityRecoveryTokens);
         if (speed && recoveryBatches.Count > 1)
         {
             recoveryBatches = recoveryBatches.Take(1).ToList();
@@ -304,7 +336,7 @@ public sealed partial class MinutesGenerator
                 trace.Items.Add(new MinutesTrace.Item("recover-request", unit.Id, string.Empty, unit.Text, unit.Id, string.Empty));
             }
 
-            string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.Recovery(recoveryBatches[b]),
+            string answer = await model.CompleteAsync(FactPrompt.System, FactPrompt.Recovery(recoveryBatches[b], FactPrompt.Known(KnownTopics(facts), null), u => TopicBefore(facts, units, u)),
                 FactPrompt.MaxAnswerTokens, cancellationToken).ConfigureAwait(false);
             var allowed = recoveryBatches[b].SelectMany(r => r.Range).Select(u => u.Id).ToHashSet();
             var found = Accept(FactMinutes.Parse(answer, out int bad), allowed, "recover").ToList();
@@ -319,7 +351,7 @@ public sealed partial class MinutesGenerator
         var everything = units.Select(u => u.Id).ToHashSet();
         facts = facts.Select(f =>
         {
-            var clarified = FactMinutes.Clarify(f, units);
+            var clarified = FactMinutes.TaskFromSource(FactMinutes.Clarify(f, units), byId);
             // Completed facts are checked again (their text and sources changed).
             return ReferenceEquals(clarified, f) || clarified.Text == f.Text ? clarified : FactMinutes.Check(clarified, byId, everything);
         }).ToList();

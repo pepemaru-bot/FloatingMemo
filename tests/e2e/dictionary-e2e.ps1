@@ -117,6 +117,28 @@ try {
   Check "category switch shown" ($category -ne $null)
   $win.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close(); Start-Sleep 1
   CloseWindow; [void](WaitExit 20)
+
+  # --- CSV import: preview, the update choice and a backup (made-up terms) ------------------------
+  $csv = Join-Path (Split-Path $NotesDir) 'e2e-terms.csv'
+  [IO.File]::WriteAllText($csv, "用語,読み,誤認識,分類`r`n架空ホール,かくうほーる,加工ホール | 架空保留,会場`r`n新しい架空語,,,用語`r`n新しい架空語,,,用語`r`n", [Text.UTF8Encoding]::new($true))
+  Launch -Extra @('--fake-llm', '--import-dictionary', $csv)
+  MinutesMenu 'MinutesSettings'
+  $win = SettingsWindow
+  Start-Sleep 2
+  $preview = In $win 'ImportPreview'
+  Check "CSV import shows a preview first (nothing changed yet)" ($preview.Current.Name -match '追加 1 語' -and $preview.Current.Name -match '重複') $preview.Current.Name
+  $update = $win.FindFirst([Windows.Automation.TreeScope]::Descendants, (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, '更新（新しい語を追加し、既存の語はファイルの内容に）')))
+  $update.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select(); Start-Sleep 0.5
+  Check "the preview follows the chosen way (update: 1 changed)" ((In $win 'ImportPreview').Current.Name -match '更新 1 語') (In $win 'ImportPreview').Current.Name
+  $go = $win.FindFirst([Windows.Automation.TreeScope]::Descendants, (New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, '取り込む')))
+  $go.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep 1.5
+  $json = [IO.File]::ReadAllText($dictFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
+  $hall = @($json.Entries | Where-Object { $_.Term -eq '架空ホール' })[0]
+  Check "update: the category from the file, spellings merged" ($hall.Category -eq '会場' -and ($hall.Misrecognitions -contains '架空保留')) "$($hall.Category) $($hall.Misrecognitions -join ',')"
+  Check "the term twice in the file was added once" (@($json.Entries | Where-Object { $_.Term -eq '新しい架空語' }).Count -eq 1)
+  Check "a backup of the dictionary was written first" (@(Get-ChildItem (Split-Path $dictFile) -Filter 'dictionary.backup-*.json').Count -ge 1)
+  $win.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close(); Start-Sleep 1
+  CloseWindow; [void](WaitExit 20)
 }
 catch { "ERROR: $_ (line $($_.InvocationInfo.ScriptLineNumber))" }
 finally {

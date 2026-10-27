@@ -82,10 +82,9 @@ public sealed class FactMinutesTests
         var (draft, _) = Run(Note, Answer);
         var facts = draft.Facts!;
 
-        var review = facts.Single(f => f.Text == "テスト計画のレビュー");
-        Assert.Equal(string.Empty, review.Who);  // 石井 is not in B003
-        Assert.Equal(string.Empty, review.Due);  // 金曜日 is not in B003
-        Assert.Contains(review.Issues, i => i.Contains("担当"));
+        // A task its statement does not carry ("テスト計画のレビュー" by 石井, cited B003) becomes the
+        // statement's own words — the task B003 does state — so no invented task or person remains.
+        Assert.DoesNotContain(facts, f => f.Text == "テスト計画のレビュー" || f.Who == "石井");
 
         var task = facts.Single(f => f.Text == "テスト計画を作る");
         Assert.Equal("森", task.Who);
@@ -94,8 +93,9 @@ public sealed class FactMinutesTests
         // "まだ決まっていません" / "検討しましょう" cited for a "decision": it is open.
         Assert.Equal(FactKind.Open, facts.Single(f => f.Text.StartsWith("予算は見積もり")).Kind);
 
-        // A number not in the cited unit is flagged; 11月20日 = 十一月二十日 is not.
-        Assert.Contains(facts.Single(f => f.Text.EndsWith("11月21日")).Issues, i => i.Contains("21"));
+        // A number not in the cited unit never reaches the minutes: the statement's words replace
+        // the fact (11月20日 = 十一月二十日 is the same number and stays as written).
+        Assert.DoesNotContain(facts, f => f.Text.Contains("11月21日"));
         Assert.Empty(facts.Single(f => f.Text == "リリース日は11月20日").Issues);
 
         // A unit number that does not exist.
@@ -114,7 +114,7 @@ public sealed class FactMinutesTests
         Assert.Equal(1, CountOf(minutes, "## リリース日"));                 // "リリース日について" merged into it
         Assert.Equal(1, CountOf(minutes, "リリース日は11月20日"));           // the same statement twice: kept once …
         Assert.DoesNotContain("リリース日は十一月二十日 〔", minutes);
-        Assert.Contains("リリース日は11月21日", minutes);                    // … but another number is another statement
+        Assert.DoesNotContain("11月21日", minutes);                          // a number the statement does not say is not shown
         Assert.Contains("- [ ] テスト計画を作る — 担当: 森 / 期限: 来週の水曜日 〔B003〕", minutes);
         Assert.Contains("- 予算の上限は三百万円 〔A002〕（メモより）", minutes);
         Assert.Contains("【未決】予算は見積もり後に決める", minutes);

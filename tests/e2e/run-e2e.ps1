@@ -76,6 +76,7 @@ $suites = [ordered]@{
     'listdrag'      = @()
     'preview'       = @()
     'modes'         = @()
+    'toolbar'       = @()
     'integration'   = @('-LongSpeech', $long)
 }
 

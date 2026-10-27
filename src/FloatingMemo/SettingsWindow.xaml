@@ -153,7 +153,8 @@
                 Header="辞書を AI 校正のヒントに使う（文字起こしに関係する語だけを AI に渡します。自動置換はしません）"
                 Toggled="OnUseDictionaryToggled" />
             <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
-                <Button AutomationProperties.AutomationId="ImportDictionary" Click="OnImportClick" Content="JSON をインポート…" />
+                <Button AutomationProperties.AutomationId="ImportDictionary" Click="OnImportClick" Content="取り込み（CSV / JSON）…" />
+                <Button AutomationProperties.AutomationId="ExportDictionary" Click="OnExportClick" Content="書き出し…" />
                 <TextBox
                     x:Name="SearchBox"
                     Width="220"

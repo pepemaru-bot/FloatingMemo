@@ -314,6 +314,63 @@ public sealed class TermDictionary
         Save();
     }
 
+    // ----- Import with a mode (CSV / exported JSON, see DictionaryTransfer) -----------------------
+
+    /// <summary>
+    /// Applies an import. Before Update or Replace the current dictionary is copied next to it
+    /// (dictionary.backup-yyyyMMdd-HHmmss.json), so nothing is lost. Returns the backup path (or null).
+    /// </summary>
+    public (ImportPreview Result, string? Backup) Apply(IReadOnlyList<TermEntry> incoming, ImportMode mode)
+    {
+        string? backup = null;
+        ImportPreview result;
+        lock (_lock)
+        {
+            result = DictionaryTransfer.Preview(Data.Entries, incoming, mode);
+            if (mode != ImportMode.Add && File.Exists(FilePath))
+            {
+                backup = Path.Combine(Path.GetDirectoryName(FilePath)!, $"dictionary.backup-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+                File.Copy(FilePath, backup, overwrite: true);
+            }
+
+            var (unique, _, _) = DictionaryTransfer.Distinct(incoming);
+            if (mode == ImportMode.Replace)
+            {
+                Data.Entries = unique.Select(Copy).ToList();
+            }
+            else
+            {
+                foreach (var entry in unique)
+                {
+                    var existing = Data.Entries.FirstOrDefault(e => DictionaryTransfer.Key(e.Term) == DictionaryTransfer.Key(entry.Term));
+                    if (existing is null)
+                    {
+                        Data.Entries.Add(Copy(entry));
+                    }
+                    else if (mode == ImportMode.Update && !DictionaryTransfer.SameContent(existing, entry))
+                    {
+                        existing.Reading = entry.Reading ?? existing.Reading;
+                        existing.Aliases = Clean(existing.Aliases.Concat(entry.Aliases));
+                        existing.Misrecognitions = Clean(existing.Misrecognitions.Concat(entry.Misrecognitions));
+                        existing.Category = entry.Category;
+                        existing.Enabled = entry.Enabled;
+                        existing.WhisperHint = entry.WhisperHint;
+                        existing.Updated = DateTime.Now;
+                    }
+                }
+            }
+        }
+
+        Save();
+        return (result, backup);
+
+        static TermEntry Copy(TermEntry e) => new()
+        {
+            Id = e.Id, Term = e.Term, Reading = e.Reading, Aliases = [.. e.Aliases], Misrecognitions = [.. e.Misrecognitions],
+            Category = e.Category, Enabled = e.Enabled, WhisperHint = e.WhisperHint, Source = e.Source, Updated = e.Updated,
+        };
+    }
+
     // ----- Import ---------------------------------------------------------------------------
 
     /// <summary>

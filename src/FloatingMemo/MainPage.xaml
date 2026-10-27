@@ -557,7 +557,8 @@
                 ToolTipService.ToolTip="表を挿入">
                 <FontIcon FontSize="14" Glyph="&#xE80A;" />
                 <Button.Flyout>
-                    <Flyout x:Name="TableFlyout" Placement="TopEdgeAlignedRight" Opening="OnTableFlyoutOpening">
+                    <!-- The button keeps focus in the note (AllowFocusOnInteraction=False); the picker itself must take focus, or its number boxes ignore clicks and keys. -->
+                    <Flyout x:Name="TableFlyout" AllowFocusOnInteraction="True" Placement="TopEdgeAlignedRight" Opening="OnTableFlyoutOpening" Opened="OnTableFlyoutOpened">
                         <StackPanel Spacing="8" MinWidth="200">
                             <TextBlock Style="{ThemeResource BodyStrongTextBlockStyle}" Text="表を挿入（列 × 行、見出し行を含む）" />
                             <StackPanel Orientation="Horizontal" Spacing="6">

@@ -449,6 +449,7 @@ public sealed partial class SettingsWindow : Window
     private async void OnImportClick(object sender, RoutedEventArgs e)
     {
         var picker = new FileOpenPicker();
+        picker.FileTypeFilter.Add(".csv");
         picker.FileTypeFilter.Add(".json");
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
         var file = await picker.PickSingleFileAsync();
@@ -458,6 +459,82 @@ public sealed partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>The whole dictionary as CSV (opens in Excel) or JSON, every field, to a file the user picks.</summary>
+    private async void OnExportClick(object sender, RoutedEventArgs e)
+    {
+        var picker = new Windows.Storage.Pickers.FileSavePicker { SuggestedFileName = $"用語辞書-{DateTime.Now:yyyyMMdd}" };
+        picker.FileTypeChoices.Add("CSV（Excel で開けます）", [".csv"]);
+        picker.FileTypeChoices.Add("JSON", [".json"]);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var file = await picker.PickSaveFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await ExportToAsync(file.Path);
+            await Message("書き出しました", $"{file.Path}\n{_dictionary.Entries.Count} 語");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            await Message("書き出せませんでした", $"{file.Path}\n{ex.Message}");
+        }
+    }
+
+    private Task ExportToAsync(string path) => path.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+        ? File.WriteAllTextAsync(path, DictionaryTransfer.ExportCsv(_dictionary.Entries), new System.Text.UTF8Encoding(true))
+        : File.WriteAllTextAsync(path, DictionaryTransfer.ExportJson(_dictionary.Entries), new System.Text.UTF8Encoding(false));
+
+    /// <summary>
+    /// CSV or a file this app exported: shows what would change (added / updated / unchanged /
+    /// removed, terms twice in the file) for the chosen way (add, update, replace) before anything
+    /// changes. Replace and update first copy the current dictionary to a backup file.
+    /// </summary>
+    private async Task<bool> ImportWithChoiceAsync(List<TermEntry> incoming, string name)
+    {
+        var modes = new RadioButtons { Header = "取り込み方" };
+        modes.Items.Add("追加（新しい語だけ。既存の語は変えない）");
+        modes.Items.Add("更新（新しい語を追加し、既存の語はファイルの内容に）");
+        modes.Items.Add("置換（辞書をファイルの内容にする。今の辞書はバックアップ）");
+        modes.SelectedIndex = 0;
+        AutomationProperties.SetAutomationId(modes, "ImportMode");
+        var preview = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        AutomationProperties.SetAutomationId(preview, "ImportPreview");
+        ImportMode Mode() => (ImportMode)Math.Max(0, modes.SelectedIndex);
+        void Show()
+        {
+            var p = DictionaryTransfer.Preview(_dictionary.Entries, incoming, Mode());
+            preview.Text = $"追加 {p.Added} 語、更新 {p.Updated} 語、変更なし {p.Unchanged} 語"
+                + (p.Removed > 0 ? $"、削除 {p.Removed} 語（バックアップに残ります）" : string.Empty)
+                + (p.DuplicatesInFile.Count > 0 ? $"\nファイル内の重複（最初の行だけ使う）: {string.Join("、", p.DuplicatesInFile.Take(10))}{(p.DuplicatesInFile.Count > 10 ? " ほか" : string.Empty)}" : string.Empty)
+                + (p.Skipped > 0 ? $"\n用語が空の行: {p.Skipped} 行（読み飛ばし）" : string.Empty);
+        }
+
+        modes.SelectionChanged += (_, _) => Show();
+        Show();
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = $"辞書の取り込み: {name}（{incoming.Count} 行）",
+            Content = new StackPanel { Spacing = 12, Children = { modes, preview } },
+            PrimaryButtonText = "取り込む",
+            CloseButtonText = "キャンセル",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return false;
+        }
+
+        var (result, backup) = _dictionary.Apply(incoming, Mode());
+        await Message("取り込みました", $"追加 {result.Added} 語、更新 {result.Updated} 語"
+            + (result.Removed > 0 ? $"、削除 {result.Removed} 語" : string.Empty)
+            + (backup is not null ? $"\n取り込む前の辞書: {backup}" : string.Empty));
+        return true;
+    }
+
     /// <summary>Imports a JSON term list chosen by the user and shows what happened.</summary>
     private async Task ImportFileAsync(Windows.Storage.StorageFile file)
     {
@@ -465,12 +542,22 @@ public sealed partial class SettingsWindow : Window
         {
             // Read through the picker's file object (works for any location the picker offers).
             string json = await Windows.Storage.FileIO.ReadTextAsync(file);
+            // CSV, or a JSON file this app exported: the add / update / replace choice with a preview.
+            var incoming = file.Name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) ? DictionaryTransfer.ParseCsv(json) : DictionaryTransfer.ParseExportedJson(json);
+            if (incoming is not null)
+            {
+                await ImportWithChoiceAsync(incoming, file.Name);
+                RenderCategories();
+                RenderEntries();
+                return;
+            }
+
             var result = _dictionary.Import(json, file.Name);
             await Message("インポートしました",
                 $"追加 {result.Added} 件、既存の語に統合 {result.Merged} 件、読み飛ばし {result.Skipped} 件。\n分類: {string.Join("、", result.Categories)}\n\n"
                 + "辞書の語は、文字起こしに関係するものだけが AI 校正のヒントになります。自動で置き換えることはありません。");
         }
-        catch (Exception ex) when (ex is System.Text.Json.JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
         {
             await Message("インポートできませんでした", $"{file.Path}\n{ex.Message}");
         }
