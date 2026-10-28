@@ -77,6 +77,7 @@ $suites = [ordered]@{
     'preview'       = @()
     'modes'         = @()
     'toolbar'       = @()
+    'tooltip'       = @('-Speech', $speech)
     'integration'   = @('-LongSpeech', $long)
 }
 

@@ -636,6 +636,45 @@ public static partial class FactMinutes
     /// 【要確認】 and names that statement. An earlier "まだ決まっていない" is normal (decided later).
     /// An open item that a later statement seems to decide keeps 【未決】 with a note.
     /// </summary>
+    /// <summary>
+    /// The kind a meeting statement itself states, from its wording: "月額は二千九百八十円で始めます",
+    /// "年額プランは今回は作りません", "席替えは十一月の第三週に行います" declare what was decided
+    /// (null when the wording says nothing certain). Plans ("予定です"), proposals ("〜してはどうか"),
+    /// "検討します", "相談してから決めます" and anything said with a doubt are never decisions; the
+    /// last ones are open. Only for facts with one source the model called information or proposal.
+    /// </summary>
+    public static Fact ByWording(Fact fact, IReadOnlyDictionary<string, SourceUnit> units)
+    {
+        if (fact.Kind is not (FactKind.Info or FactKind.Proposal or FactKind.Opinion) || fact.Sources.Count != 1
+            || !units.TryGetValue(fact.Sources[0], out var unit))
+        {
+            return fact;
+        }
+
+        string text = unit.Text.Trim();
+        if (OpenWording().IsMatch(text))
+        {
+            return fact with { Kind = FactKind.Open };
+        }
+
+        if (fact.Kind == FactKind.Proposal || NotCertain().IsMatch(text) || !DeclaredWording().IsMatch(text))
+        {
+            return fact;
+        }
+
+        return fact with { Kind = FactKind.Decision };
+    }
+
+    // "〜にします", "〜で始めます", "〜行います", "〜しません", "〜とします", "〜見送ります" at the end of the statement.
+    [GeneratedRegex(@"(にします|ことにします|で始めます|で行きます|でいきます|切り替えます|行います|実施します|開催します|発行にします|とします|作りません|しません|行いません|見送ります|絞ります|一本化します|更新します|対応します|連絡します|見直します)[。！!]?$")]
+    private static partial Regex DeclaredWording();
+
+    [GeneratedRegex(@"予定|かもしれ|と思|たい|ましょうか|てはどう|どうでしょう|提案|案として|でしょう|可能性|検討中|未定|まだ")]
+    private static partial Regex NotCertain();
+
+    [GeneratedRegex(@"(検討します|相談してから決め|あらためて決め|改めて決め|次回(まで)?に?決め|保留にします|まだ決まって|決まっていません|未定です)")]
+    private static partial Regex OpenWording();
+
     public static Fact CrossCheck(Fact fact, IReadOnlyList<SourceUnit> units)
     {
         if (fact.Kind is not (FactKind.Decision or FactKind.Open) || fact.Sources.Count == 0)
@@ -915,7 +954,7 @@ public static partial class FactMinutes
 
     public static bool IsVague(string text) => VagueCue().IsMatch(text) && !ImportantCue().IsMatch(text) && !Digits().IsMatch(Numerals.Arabic(text));
 
-    [GeneratedRegex(@"話に戻|に戻ります|そういう|そんな|似たような|同じような|同じ話|このあたり|そちら|あちら|だいぶ違|また別|話に出て|様子を見|印象を持|感覚として|参考に|考えたい|気になって|かもしれません")]
+    [GeneratedRegex(@"(ようです|と思います|ですね|ましたね|ますね|よね|気がします|ところです|ありません|でしょうか|にしましょうか)[。]?$|話に戻|に戻ります|そういう|そんな|似たような|同じような|同じ話|このあたり|そちら|あちら|だいぶ違|また別|話に出て|様子を見|印象を持|感覚として|参考に|考えたい|気になって|かもしれません")]
     private static partial Regex VagueCue();
 
     public static bool OnlyProcedural(Fact fact, IReadOnlyDictionary<string, SourceUnit> units) =>
@@ -1132,7 +1171,7 @@ public static partial class FactMinutes
             return fact;
         }
 
-        string text = TaskEnding().Replace(unit.Text.Trim(), string.Empty).TrimEnd('、', '。', ' ');
+        string text = TaskEnding().Replace(SpokenOpening().Replace(unit.Text.Trim(), string.Empty), string.Empty).TrimEnd('、', '。', ' ');
         return text.Length < 4 ? fact : fact with { Text = text, Issues = fact.Issues.Where(i => !i.StartsWith("数字", StringComparison.Ordinal) && !i.StartsWith("根拠の原文は内容", StringComparison.Ordinal)).ToList() };
     }
 
@@ -1144,6 +1183,12 @@ public static partial class FactMinutes
 
     [GeneratedRegex(@"(?<due>[0-9０-９〇一二三四五六七八九十]+月[0-9０-９〇一二三四五六七八九十]+日)(まで|中に)")]
     private static partial Regex Deadline();
+
+    // Words that only open a spoken sentence: not part of the statement written into the minutes.
+    [GeneratedRegex(@"^((あ|あー|えー|えーと|えっと|あの|あのー|まあ|では|じゃあ|それで|それから|あと|ただ|さて|議論の結果|結論として|最終的に)[、,\s]+)+")]
+    private static partial Regex SpokenOpening();
+
+    public static string WithoutSpokenOpening(string text) => SpokenOpening().Replace(text, string.Empty);
 
     [GeneratedRegex(@"(して)?(ください|お願いします|お願いいたします|をお願いします)[。！]*$")]
     private static partial Regex TaskEnding();

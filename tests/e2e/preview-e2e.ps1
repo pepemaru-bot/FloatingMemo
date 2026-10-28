@@ -80,7 +80,8 @@ try {
     [void](WaitMode ($i % 2 -eq 1))
   }
   $p = WaitMode $false
-  Check "back in the editor after the switches" ($p -and $null -eq $p.preview)
+  # The mode switch shows the mode the page confirmed (the probe mirror can lag behind).
+  Check "back in the editor after the switches" ((Find 'ModeSwitch').Current.ItemStatus -eq 'ソース編集') "$((Find 'ModeSwitch').Current.ItemStatus)"
   Check "Markdown unchanged after 22 switches" ((Text) -eq $edited) (Esc (Text))
 
   # Editing works at once and the undo history is still there.

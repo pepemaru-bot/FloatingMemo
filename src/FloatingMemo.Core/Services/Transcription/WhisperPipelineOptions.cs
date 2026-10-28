@@ -7,7 +7,11 @@ namespace FloatingMemo.Services.Transcription;
 /// <param name="SkipSilence">Send only detected speech to Whisper (no long silent stretches).</param>
 /// <param name="NoContext">Do not condition each window on the previous window's text.</param>
 /// <param name="GuardRepetitions">Drop repeated lines over silent audio / physically impossible repeats.</param>
-public sealed record WhisperPipelineOptions(bool SkipSilence, bool NoContext, bool GuardRepetitions)
+/// <param name="SileroVadPath">Silero VAD model (ggml) for finding speech; null = the built-in energy detector (default).</param>
+/// <param name="CarryInitialPrompt">Give the dictionary hint to every 30 s decode window, not only the first of a call.</param>
+/// <param name="Temperature">Whisper's sampling temperature; null = Whisper.net's default.</param>
+public sealed record WhisperPipelineOptions(bool SkipSilence, bool NoContext, bool GuardRepetitions,
+    string? SileroVadPath = null, bool CarryInitialPrompt = false, float? Temperature = null)
 {
     public static WhisperPipelineOptions Default { get; } = new(true, true, true);
 

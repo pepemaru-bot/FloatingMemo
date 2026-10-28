@@ -13,6 +13,9 @@ namespace FloatingMemo.Services.Minutes;
 /// </summary>
 public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
 {
+    /// <summary>The sampler's seed (fixed, so the same input gives the same draft). Tests vary it to measure spread.</summary>
+    public static uint SamplingSeed { get; set; } = 42;
+
     private readonly string _modelPath;
     private readonly ModelParams _parameters;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -162,7 +165,7 @@ public sealed class LlamaTextGenerator : ILocalTextGenerator, IDisposable
                 MaxTokens = maxTokens,
                 AntiPrompts = ["<|im_end|>", "<|endoftext|>"],
                 // Low temperature: stay close to the transcript instead of being "creative".
-                SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.2f, TopP = 0.9f, RepeatPenalty = 1.05f, Seed = 42 },
+                SamplingPipeline = new DefaultSamplingPipeline { Temperature = 0.2f, TopP = 0.9f, RepeatPenalty = 1.05f, Seed = SamplingSeed },
             };
 
             var answer = new StringBuilder();

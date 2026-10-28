@@ -156,7 +156,25 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
             if (!string.IsNullOrWhiteSpace(hint))
             {
                 builder = builder.WithPrompt(hint);
+                if (Options.CarryInitialPrompt)
+                {
+                    builder = builder.WithCarryInitialPrompt(true);
+                }
             }
+
+            if (Options.Temperature is { } temperature)
+            {
+                builder = builder.WithTemperature(temperature);
+            }
+
+            // Speech detection: the energy detector, or Silero VAD when its model is given (comparison).
+            using var silero = Options.SileroVadPath is { } vadPath && File.Exists(vadPath) ? WhisperVadFactory.FromPath(vadPath) : null;
+            using var vad = silero?.CreateBuilder()
+                .WithThreshold(0.5f)
+                .WithMinSpeechDuration(TimeSpan.FromMilliseconds(200))
+                .WithMinSilenceDuration(TimeSpan.FromMilliseconds(700))
+                .WithSpeechPadding(TimeSpan.FromMilliseconds(250))
+                .Build();
 
             // Progress = audio already finished + whisper.cpp's own percentage for the current
             // stretch, over the whole recording.
@@ -196,7 +214,10 @@ public sealed partial class LocalWhisperTranscriptionService : ITranscriptionSer
 
                     bool last = read < windowSamples;
                     var window = new ReadOnlyMemory<float>(buffer, 0, length);
-                    var found = SpeechActivity.Detect(window.Span, rate);
+                    var found = vad is null ? SpeechActivity.Detect(window.Span, rate)
+                        : vad.DetectSpeech(window.Span).Select(s => new SpeechRegion(
+                            (int)Math.Clamp(s.Start.TotalSeconds * rate, 0, length), (int)Math.Clamp(s.End.TotalSeconds * rate, 0, length)))
+                            .Where(r => r.EndSample > r.StartSample).ToList();
 
                     // Speech that runs into the end of the window is not cut: it moves to the next
                     // window (at most a minute of it; longer speech is cut), so no word is split at a boundary.

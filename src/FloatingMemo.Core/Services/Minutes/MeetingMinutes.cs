@@ -358,7 +358,7 @@ public sealed partial class MinutesGenerator
 
         // The same subject across the whole meeting: a decision that a later statement calls
         // undecided is not shown as 【決定】.
-        facts = facts.Select(f => FactMinutes.CrossCheck(f, units)).ToList();
+        facts = facts.Select(f => FactMinutes.CrossCheck(FactMinutes.ByWording(f, byId), units)).ToList();
         run.InputMode = $"facts {(speed ? "speed" : "quality")} recover={sent}/{recovery.Count} requests={recoveryBatches.Count} found={recovered} continuations={continuations}";
         var warnings = new List<string>();
         if (malformed > 0)

@@ -122,7 +122,9 @@ try {
   Check "Ctrl+Z removes the table" ((Saved) -eq $edited) (Esc (Saved))
   ClickMode 'SourceModeButton'; [void](WaitMode 'source')
   SafeKeys 0x11, 0x23
-  Invoke-Button '表を挿入'; [void](WaitFor { (Find 'TableColsBox') -ne $null } 5)
+  # The picker opens a moment after the click; under load it may need a second press.
+  Invoke-Button '表を挿入'
+  if (-not (WaitFor { (Find 'TableColsBox') -ne $null } 10)) { Invoke-Button '表を挿入'; [void](WaitFor { (Find 'TableColsBox') -ne $null } 10) }
   (Find 'TableColsBox').GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern).SetValue(2)
   (Find 'TableRowsBox').GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern).SetValue(3)
   (Find 'TableInsertButton').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()

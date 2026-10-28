@@ -24,13 +24,13 @@ public sealed record BenchCase(string Name, string Title, string Transcript, str
 public sealed record BenchScore(string Case, int Facts, int Full, int Partial, int ImportantTotal, int ImportantFull,
     int WrongSubject, int Decisions, int DecisionsTotal, int Tasks, int TasksTotal, int UndecidedAsDecision,
     int InventedNumbers, int Duplicates, int Headings, int BadHeadings, int SplitSubjects, int Links, int WrongLinks,
-    int NeedsReview, int Items, double Seconds, long PeakMb)
+    int NeedsReview, int Items, double Seconds, long PeakMb, int ImportantEvidenced = 0)
 {
     public static string Header =>
-        "| 会議 | 完全網羅 | 部分網羅 | 重要事項 | 対象の取り違え | 決定 | Next Action | 未決→決定 | 原文にない数値 | 重複 | 見出し | 不適切な見出し | 対象の見出し分裂 | 根拠リンク誤り | 要確認 | 項目 | 時間 | メモリ |\n"
-        + "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
+        "| 会議 | 完全網羅 | 部分網羅 | 重要事項 | 根拠つき重要事項 | 対象の取り違え | 決定 | Next Action | 未決→決定 | 原文にない数値 | 重複 | 見出し | 不適切な見出し | 対象の見出し分裂 | 根拠リンク誤り | 要確認 | 項目 | 時間 | メモリ |\n"
+        + "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|";
 
-    public string Row => $"| {Case} | {Full}/{Facts} | {Partial} | {ImportantFull}/{ImportantTotal} | {WrongSubject} | {Decisions}/{DecisionsTotal} | {Tasks}/{TasksTotal} | {UndecidedAsDecision} | "
+    public string Row => $"| {Case} | {Full}/{Facts} | {Partial} | {ImportantFull}/{ImportantTotal} | {ImportantEvidenced}/{ImportantTotal} | {WrongSubject} | {Decisions}/{DecisionsTotal} | {Tasks}/{TasksTotal} | {UndecidedAsDecision} | "
         + $"{InventedNumbers} | {Duplicates} | {Headings} | {BadHeadings} | {SplitSubjects} | {WrongLinks}/{Links} | {NeedsReview} | {Items} | {Seconds:F0}s | {PeakMb}MB |";
 }
 
@@ -261,7 +261,16 @@ public static partial class QualityBench
         bool IsDecision((string Heading, string Raw, string Text) i) => i.Text.Contains("【決定】", StringComparison.Ordinal) || i.Heading.StartsWith("決定", StringComparison.Ordinal);
         bool IsTask((string Heading, string Raw, string Text) i) => i.Text.TrimStart().StartsWith("- [", StringComparison.Ordinal);
 
-        int full = 0, partial = 0, importantFull = 0, wrongSubject = 0, decisions = 0, tasks = 0;
+        int full = 0, partial = 0, importantFull = 0, importantEvidenced = 0, wrongSubject = 0, decisions = 0, tasks = 0;
+        // An item whose citations all carry it (and that has at least one).
+        bool Evidenced(string raw)
+        {
+            var found = Citations().Matches(raw);
+            return found.Count > 0 && found.All(m => FactEvidence.Check(Decorations().Replace(raw, string.Empty).Split(" — ")[0],
+                string.Join("。", m.Groups["ids"].Value.Split('・').Select(id => units.GetValueOrDefault(id, string.Empty))),
+                raw.Contains("【決定】", StringComparison.Ordinal) ? FactKind.Decision : FactKind.Info).Level != Support.Unsupported);
+        }
+
         foreach (var f in c.Facts)
         {
             var words = f.Keywords.Concat(f.Kind == FactKind.Task ? new[] { f.Who, f.Due } : []).Where(w => w.Length > 0).ToArray();
@@ -272,6 +281,10 @@ public static partial class QualityBench
                 if (f.Important)
                 {
                     importantFull++;
+                    if (Evidenced(hit.Raw))
+                    {
+                        importantEvidenced++;
+                    }
                 }
 
                 // The item (or its heading) names another subject and not its own: mixed up.
@@ -326,7 +339,7 @@ public static partial class QualityBench
         int review = items.Count(i => i.Raw.Contains("要確認", StringComparison.Ordinal));
         return new BenchScore(c.Name, c.Facts.Length, full, partial, c.Facts.Count(f => f.Important), importantFull, wrongSubject,
             decisions, c.Facts.Count(f => f.Kind == FactKind.Decision), tasks, c.Facts.Count(f => f.Kind == FactKind.Task), undecided,
-            invented, duplicates, headings.Count, badHeadings, split, links, wrongLinks, review, items.Count, seconds, peakMb);
+            invented, duplicates, headings.Count, badHeadings, split, links, wrongLinks, review, items.Count, seconds, peakMb, importantEvidenced);
     }
 }
 
@@ -349,34 +362,49 @@ public sealed class QualityBenchRun(ITestOutputHelper output)
         Assert.True(File.Exists(model), model);
 
         var sb = new StringBuilder($"# 議事録品質ベンチマーク（{label}、Qwen3-4B-Q4_K_M、{mode}、{DateTime.Now:yyyy-MM-dd HH:mm}）\n\n");
+        // FLOATINGMEMO_BENCH_SET: main (the tuned set), holdout (never tuned on) or all.
+        // FLOATINGMEMO_BENCH_SEEDS: comma-separated sampler seeds, one run each (spread).
+        string set = Environment.GetEnvironmentVariable("FLOATINGMEMO_BENCH_SET") ?? "main";
+        BenchCase[] cases = set switch { "holdout" => QualityHoldout.All, "all" => [.. QualityBench.All, .. QualityHoldout.All], _ => QualityBench.All };
+        var seeds = (Environment.GetEnvironmentVariable("FLOATINGMEMO_BENCH_SEEDS") ?? "42").Split(',').Select(uint.Parse).ToList();
+        sb.Append($"評価データ: {set}、シード: {string.Join(",", seeds)}\n\n");
         sb.Append(BenchScore.Header).Append('\n');
         using var llm = new LlamaTextGenerator(model);
         var scores = new List<BenchScore>();
-        foreach (var c in QualityBench.All)
+        foreach (uint seed in seeds)
+        foreach (var c in cases)
         {
+            LlamaTextGenerator.SamplingSeed = seed;
             long peak = 0;
             using var sampler = new Timer(_ => { using var p = Process.GetCurrentProcess(); peak = Math.Max(peak, p.WorkingSet64); }, null, 0, 200);
             var watch = Stopwatch.StartNew();
             var draft = await new MinutesGenerator(llm, MinutesStyle.Facts) { Priority = MinutesPriority.Quality }
                 .GenerateAsync(c.Note, c.Title, new DateTime(2026, 10, 28, 9, 0, 0));
             watch.Stop();
-            var score = QualityBench.Score(c, draft.Markdown, watch.Elapsed.TotalSeconds, peak / 1024 / 1024);
+            var score = QualityBench.Score(c, draft.Markdown, watch.Elapsed.TotalSeconds, peak / 1024 / 1024) with { Case = seeds.Count > 1 ? $"{c.Name}（{seed}）" : c.Name };
             scores.Add(score);
             sb.Append(score.Row).Append('\n');
-            File.WriteAllText(Path.Combine(outDir, $"{label}-{c.Name}.md"), draft.Markdown);
+            File.WriteAllText(Path.Combine(outDir, $"{label}-{c.Name}-{seed}.md"), draft.Markdown);
             if (draft.Trace is { } trace)
             {
-                File.WriteAllLines(Path.Combine(outDir, $"{label}-{c.Name}.trace.tsv"),
+                File.WriteAllLines(Path.Combine(outDir, $"{label}-{c.Name}-{seed}.trace.tsv"),
                     trace.Items.Select(t => $"{t.Stage}	{t.Kind}	{t.Sources}	{t.Text}	{t.Note}"));
             }
             output.WriteLine(score.Row);
         }
 
         int Sum(Func<BenchScore, int> f) => scores.Sum(f);
-        sb.Append($"| **合計** | {Sum(s => s.Full)}/{Sum(s => s.Facts)} | {Sum(s => s.Partial)} | {Sum(s => s.ImportantFull)}/{Sum(s => s.ImportantTotal)} | {Sum(s => s.WrongSubject)} | "
+        sb.Append($"| **合計** | {Sum(s => s.Full)}/{Sum(s => s.Facts)} | {Sum(s => s.Partial)} | {Sum(s => s.ImportantFull)}/{Sum(s => s.ImportantTotal)} | {Sum(s => s.ImportantEvidenced)}/{Sum(s => s.ImportantTotal)} | {Sum(s => s.WrongSubject)} | "
             + $"{Sum(s => s.Decisions)}/{Sum(s => s.DecisionsTotal)} | {Sum(s => s.Tasks)}/{Sum(s => s.TasksTotal)} | {Sum(s => s.UndecidedAsDecision)} | {Sum(s => s.InventedNumbers)} | "
             + $"{Sum(s => s.Duplicates)} | {Sum(s => s.Headings)} | {Sum(s => s.BadHeadings)} | {Sum(s => s.SplitSubjects)} | {Sum(s => s.WrongLinks)}/{Sum(s => s.Links)} | "
             + $"{Sum(s => s.NeedsReview)} | {Sum(s => s.Items)} | {scores.Sum(s => s.Seconds):F0}s | {scores.Max(s => s.PeakMb)}MB |\n");
+        if (seeds.Count > 1)
+        {
+            // Spread over the seeds: the important-fact coverage of each run.
+            var perRun = seeds.Select(s => scores.Where(x => x.Case.EndsWith($"（{s}）", StringComparison.Ordinal)).Sum(x => x.ImportantFull)).ToList();
+            sb.Append($"\n重要事項の網羅（実行ごと）: {string.Join(" / ", perRun)}（最小 {perRun.Min()}、最大 {perRun.Max()}、平均 {perRun.Average():F1}）\n");
+        }
+
         File.WriteAllText(Path.Combine(outDir, $"{label}-scores.md"), sb.ToString());
         output.WriteLine(sb.ToString());
     }
@@ -392,4 +420,34 @@ public sealed class TopicMergeTests
     [InlineData("アンケートの結果", "アンケート結果", true)]
     public void SimilarNames_OfDifferentSubjects_AreNotMerged(string a, string b, bool same) =>
         Assert.Equal(same, FactMinutes.SameTopicForTests(a, b));
+}
+
+/// <summary>Decisions stated as "〜します" are decisions; plans, proposals and "検討します" are not.</summary>
+public sealed class DecisionWordingTests
+{
+    [Theory]
+    [InlineData("月額は二千九百八十円で始めます。", FactKind.Info, FactKind.Decision)]
+    [InlineData("年額プランは今回は作りません。", FactKind.Info, FactKind.Decision)]
+    [InlineData("席替えは十一月の第三週に行います。", FactKind.Info, FactKind.Decision)]
+    [InlineData("発売日は四月一日を予定しています。", FactKind.Info, FactKind.Info)]
+    [InlineData("研修を五日に延ばしてはどうかという提案がありました。", FactKind.Proposal, FactKind.Proposal)]
+    [InlineData("法人向けの割引は、次回までに検討します。", FactKind.Proposal, FactKind.Open)]
+    [InlineData("期間については、人事と相談してから決めます。", FactKind.Info, FactKind.Open)]
+    [InlineData("来週は全員で行いますかもしれません。", FactKind.Info, FactKind.Info)]
+    public void WordingOfTheStatement_SetsTheKind(string statement, string modelKind, string expected)
+    {
+        var units = new Dictionary<string, SourceUnit> { ["B001"] = new SourceUnit("B001", statement, false) };
+        var fact = new Fact(modelKind, "話題", statement, ["B001"], string.Empty, string.Empty);
+        Assert.Equal(expected, FactMinutes.ByWording(fact, units).Kind);
+    }
+}
+
+public sealed class SpokenOpeningTests
+{
+    [Theory]
+    [InlineData("あ、はい、消火器の交換は藤田さんが行います", "はい、消火器の交換は藤田さんが行います")]
+    [InlineData("議論の結果、北町店にはセルフレジを二台追加します", "北町店にはセルフレジを二台追加します")]
+    [InlineData("えーと、では、契約書の確認をお願いします", "契約書の確認をお願いします")]
+    [InlineData("あと三日で終わります", "あと三日で終わります")]
+    public void OpeningWords_AreDropped(string spoken, string written) => Assert.Equal(written, FactMinutes.WithoutSpokenOpening(spoken));
 }
