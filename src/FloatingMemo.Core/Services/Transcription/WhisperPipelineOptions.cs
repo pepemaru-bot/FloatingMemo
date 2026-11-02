@@ -10,10 +10,16 @@ namespace FloatingMemo.Services.Transcription;
 /// <param name="SileroVadPath">Silero VAD model (ggml) for finding speech; null = the built-in energy detector (default).</param>
 /// <param name="CarryInitialPrompt">Give the dictionary hint to every 30 s decode window, not only the first of a call.</param>
 /// <param name="Temperature">Whisper's sampling temperature; null = Whisper.net's default.</param>
+/// <param name="RecoverDroppedTail">
+/// With the dictionary hint, Whisper sometimes stops after the first sentence of a region and
+/// the rest (17 s, four statements, in a made-up meeting) never comes back. When a region's last
+/// text ends 3 s or more before the region does and the detector still heard speech there, that
+/// part is decoded again without the hint.
+/// </param>
 public sealed record WhisperPipelineOptions(bool SkipSilence, bool NoContext, bool GuardRepetitions,
-    string? SileroVadPath = null, bool CarryInitialPrompt = false, float? Temperature = null)
+    string? SileroVadPath = null, bool CarryInitialPrompt = false, float? Temperature = null, bool RecoverDroppedTail = false)
 {
-    public static WhisperPipelineOptions Default { get; } = new(true, true, true);
+    public static WhisperPipelineOptions Default { get; } = new(true, true, true, RecoverDroppedTail: true);
 
     /// <summary>Behaviour before the fix (for comparison in the benchmark).</summary>
     public static WhisperPipelineOptions Baseline { get; } = new(false, false, false);

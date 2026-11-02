@@ -4,7 +4,7 @@ $recordings = Join-Path (Split-Path $NotesDir) 'recordings' # the test folder (-
 function Sessions { if (Test-Path $recordings) { @(Get-ChildItem $recordings -Directory -Filter 'rec-*') } else { @() } }
 function WaitIdle($sec = 120) {
   $deadline = (Get-Date).AddSeconds($sec)
-  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 250 }
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 250 }
   $false
 }
 function StatusText { $e = Find "RecordingStatusText"; if ($e) { $e.Current.Name } else { "" } }
@@ -20,9 +20,9 @@ try {
   Invoke-Button "録音開始"; Start-Sleep 1
   Invoke-Button "録音停止"
   $seen = @(); $deadline = (Get-Date).AddSeconds(60)
-  while ((Get-Date) -lt $deadline -and -not (Find "録音開始" -ByName)) { $st = StatusText; if ($st -and $seen -notcontains $st) { $seen += $st }; Start-Sleep -Milliseconds 100 }
+  while ((Get-Date) -lt $deadline -and -not ((JobsState) -match '^unfinished=0 ')) { $st = StatusText; if ($st -and $seen -notcontains $st) { $seen += $st }; Start-Sleep -Milliseconds 100 }
   Check "shows transcription progress" (($seen -join ',') -match '文字起こし中|音声モデルを準備中') ($seen -join ', ')
-  Check "back to idle after transcription" ((Find "録音開始" -ByName) -ne $null)
+  Check "back to idle after transcription" ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') (JobsState)
   $v = Value
   Check "transcript appended at the end under the header" ($v -match "^前の行`r`r以下、AIによる文字起こし`r.*会議.*資料") (Esc $v)
   Start-Sleep 1
@@ -81,8 +81,9 @@ try {
   Check "exit with pending audio closes normally" (WaitExit)
   # Audio waiting for a retry is kept (not deleted on exit) and offered at the next start.
   Check "pending audio kept on exit for the next start" ((Sessions).Count -eq 1)
-  $kept = (Get-Content (Join-Path (Sessions)[0].FullName 'session.json') -Raw -Encoding UTF8 | ConvertFrom-Json).State
-  Check "kept audio marked for a retry" ($kept -eq 'kept') $kept
+  # The failed job stays in the queue file (ids, paths and states only) with its recording.
+  $queue = Get-Content (Join-Path $recordings 'ai-jobs.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  Check "failed job kept for a retry" (@($queue).Count -eq 1 -and $queue[0].State -eq 'Failed' -and $queue[0].SessionDirectory -eq (Sessions)[0].FullName) (($queue | ConvertTo-Json -Compress))
 }
 catch { "ERROR: $_" }
 finally {

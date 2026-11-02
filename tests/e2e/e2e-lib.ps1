@@ -100,12 +100,25 @@ function Value {
   $script:edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
 }
 function EditorKind { Mirror 'EditorKind' }
+# AI jobs (transcriptions, minutes) run apart from recording: "録音開始" reappears long before they finish.
+function JobsState { Mirror 'AiJobsState' }
+function WaitJobs($sec = 120) {
+  $deadline = (Get-Date).AddSeconds($sec)
+  while ((Get-Date) -lt $deadline) { if ((JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 250 }
+  $false
+}
 function OurEditorFocused {
   if ([K]::GetForegroundWindow() -ne $script:h) { return $false }
   $state = Mirror 'EditorFocusState'
   if ($null -ne $state) { return $state -eq 'focused' }
   $f = [Windows.Automation.AutomationElement]::FocusedElement
   $f -ne $null -and $f.Current.Name -eq "メモ" -and $f.Current.ProcessId -eq $script:app.Id
+}
+# What held the foreground and focus when a suite refused to type (for diagnosing focus flakes).
+function FocusReport {
+  $f = [Windows.Automation.AutomationElement]::FocusedElement
+  $fg = [K]::GetForegroundWindow()
+  "foreground=$(if ($fg -eq $script:h) { 'ours' } else { $fg }) mirror=$(Mirror 'EditorFocusState') focused=$($f.Current.ControlType.ProgrammaticName)/$($f.Current.AutomationId)/$($f.Current.Name) pid=$($f.Current.ProcessId)"
 }
 # Refuses to send keys unless the test app's editor has focus.
 # Waits for the test editor to own focus; if another window holds the foreground,
@@ -115,8 +128,8 @@ function EnsureFocus {
   [K]::Combo(0x11, 0x10, 0x4D); Start-Sleep 1
   if (-not (OurEditorFocused)) { [K]::Combo(0x11, 0x10, 0x4D); Start-Sleep 1 }
 }
-function SafeType([string]$text) { EnsureFocus; if (-not (OurEditorFocused)) { throw "ABORT: test editor not focused; refusing to type" }; if (-not [K]::TypeInto($script:h, $text)) { throw "ABORT: focus left the test window while typing" } }
-function SafeKeys([uint16[]]$vks) { EnsureFocus; if (-not (OurEditorFocused)) { throw "ABORT: test editor not focused; refusing to send keys" }; if (-not [K]::ComboInto($script:h, $vks)) { throw "ABORT: focus left the test window" } }
+function SafeType([string]$text) { EnsureFocus; if (-not (OurEditorFocused)) { throw "ABORT: test editor not focused; refusing to type ($(FocusReport))" }; if (-not [K]::TypeInto($script:h, $text)) { throw "ABORT: focus left the test window while typing" } }
+function SafeKeys([uint16[]]$vks) { EnsureFocus; if (-not (OurEditorFocused)) { throw "ABORT: test editor not focused; refusing to send keys ($(FocusReport))" }; if (-not [K]::ComboInto($script:h, $vks)) { throw "ABORT: focus left the test window" } }
 function CloseWindow { [void][K]::PostMessage($script:h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }  # WM_CLOSE = X button
 function WaitExit($sec = 10) { try { $script:app.WaitForExit($sec * 1000) } catch { $true } }
 function ErrorBarOpen {

@@ -47,6 +47,39 @@ public sealed class RecordingSaveException(string sessionDirectory, Exception in
     public string SessionDirectory { get; } = sessionDirectory;
 }
 
+/// <summary>
+/// A recording whose capture has stopped: its files are closed and the recorder is free again.
+/// <see cref="AudioRecorder.PrepareAsync"/> makes the transcription WAV from it.
+/// </summary>
+public sealed class StoppedRecording
+{
+    internal StoppedRecording(string sessionDirectory, AudioSources sources, IReadOnlyList<AudioTrack> inputs,
+        IReadOnlyList<string> segmentFiles, RecordingManifest manifest)
+    {
+        SessionDirectory = sessionDirectory;
+        Sources = sources;
+        Inputs = inputs;
+        SegmentFiles = segmentFiles;
+        Manifest = manifest;
+    }
+
+    public string SessionDirectory { get; }
+
+    /// <summary>Sources that actually delivered audio.</summary>
+    public AudioSources Sources { get; }
+
+    public bool HasAudio => Inputs.Count > 0;
+
+    /// <summary>Removes the session (nothing was captured, so there is nothing to keep).</summary>
+    public void Delete() => AudioRecorder.TryDeleteDirectory(SessionDirectory);
+
+    internal IReadOnlyList<AudioTrack> Inputs { get; }
+
+    internal IReadOnlyList<string> SegmentFiles { get; }
+
+    internal RecordingManifest Manifest { get; }
+}
+
 /// <summary>A recording left from an earlier run (crash, failed processing, or kept for a retry).</summary>
 public sealed record LeftoverRecording(string Directory, DateTime Created, string State, TimeSpan EstimatedDuration, long Bytes);
 
@@ -93,6 +126,12 @@ public sealed class AudioRecorder : IDisposable
     public static string DefaultWorkDirectory => Path.Combine(Path.GetTempPath(), "FloatingMemo", "recordings");
 
     public bool IsRecording => _sessionDirectory is not null;
+
+    /// <summary>Deletes a session folder (its transcript is saved, or the user chose to).</summary>
+    public static void DeleteSession(string sessionDirectory) => TryDeleteDirectory(sessionDirectory);
+
+    /// <summary>The folder the session folders are made in.</summary>
+    public string WorkDirectory => _workDirectory;
 
     public TimeSpan Elapsed => _stopwatch.Elapsed;
 
@@ -162,7 +201,14 @@ public sealed class AudioRecorder : IDisposable
     /// are deleted only once the prepared file exists. On failure nothing is deleted and a
     /// <see cref="RecordingSaveException"/> names the folder the audio is kept in.
     /// </summary>
-    public async Task<RecordedAudio> StopAsync()
+    public async Task<RecordedAudio> StopAsync() => await PrepareAsync(await StopCaptureAsync().ConfigureAwait(false), BeforePrepare).ConfigureAwait(false);
+
+    /// <summary>
+    /// Stops all sources and closes their files. The recorder is free for the next recording as
+    /// soon as this returns: the transcription WAV is made afterwards by <see cref="PrepareAsync"/>
+    /// (which may run while the next recording is going on). On failure nothing is deleted.
+    /// </summary>
+    public async Task<StoppedRecording> StopCaptureAsync()
     {
         string session = _sessionDirectory ?? throw new InvalidOperationException("Not recording.");
         _stopwatch.Stop();
@@ -173,26 +219,13 @@ public sealed class AudioRecorder : IDisposable
             SetState(session, RecordingStates.Stopped);
 
             var captured = _tracks.Where(t => t.FramesWritten > 0).ToList();
-            if (captured.Count == 0)
-            {
-                return new RecordedAudio(session, null, TimeSpan.Zero, AudioSources.None);
-            }
-
             var sources = captured.Aggregate(AudioSources.None, (all, t) => all | t.Source);
-            var inputs = captured.Select(t => new AudioTrack(t.Segments, t.StartOffset)).ToList();
-            var (output, duration) = await Task.Run(() =>
+            // Copies: the tracks are disposed below and the recorder may start again at once.
+            var inputs = captured.Select(t => new AudioTrack(t.Segments.ToList(), t.StartOffset)).ToList();
+            lock (_manifestLock)
             {
-                BeforePrepare?.Invoke();
-                return Prepare(session, inputs);
-            }).ConfigureAwait(false);
-
-            foreach (var file in _tracks.SelectMany(t => t.Segments))
-            {
-                TryDeleteFile(file);
+                return new StoppedRecording(session, sources, inputs, _tracks.SelectMany(t => t.Segments).ToList(), _manifest!);
             }
-
-            SetState(session, RecordingStates.Prepared, prepared: Path.GetFileName(output));
-            return new RecordedAudio(session, output, duration, sources);
         }
         catch (Exception ex)
         {
@@ -203,8 +236,54 @@ public sealed class AudioRecorder : IDisposable
         finally
         {
             DisposeTracks();
-            _sessionDirectory = null;
-            _manifest = null;
+            lock (_manifestLock)
+            {
+                _sessionDirectory = null;
+                _manifest = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Makes the transcription WAV of a stopped recording on a background thread. Raw segments are
+    /// deleted only once the prepared file exists. On failure nothing is deleted and a
+    /// <see cref="RecordingSaveException"/> names the folder the audio is kept in.
+    /// </summary>
+    /// <param name="beforePrepare">Tests: runs just before the file is made (throwing simulates a failure there).</param>
+    public static async Task<RecordedAudio> PrepareAsync(StoppedRecording stopped, Action? beforePrepare = null)
+    {
+        string session = stopped.SessionDirectory;
+        var manifest = stopped.Manifest; // this session's own: the recorder no longer touches it
+        if (stopped.Inputs.Count == 0)
+        {
+            return new RecordedAudio(session, null, TimeSpan.Zero, AudioSources.None);
+        }
+
+        try
+        {
+            var (output, duration) = await Task.Run(() =>
+            {
+                beforePrepare?.Invoke();
+                return Prepare(session, stopped.Inputs);
+            }).ConfigureAwait(false);
+
+            foreach (var file in stopped.SegmentFiles)
+            {
+                TryDeleteFile(file);
+            }
+
+            manifest.State = RecordingStates.Prepared;
+            manifest.Error = null;
+            manifest.Prepared = Path.GetFileName(output);
+            manifest.TrySave(session);
+            return new RecordedAudio(session, output, duration, stopped.Sources);
+        }
+        catch (Exception ex)
+        {
+            manifest.State = RecordingStates.Failed;
+            manifest.Error = $"{ex.GetType().Name}: {ex.Message}";
+            manifest.TrySave(session);
+            throw new RecordingSaveException(session, ex);
         }
     }
 

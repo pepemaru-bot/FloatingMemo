@@ -17,9 +17,15 @@ try {
 
   # --- 2. Save on Esc hide (before debounce fires) -------------------------------
   SafeType " Esc前"; SafeKeys 0x1B
-  Start-Sleep -Milliseconds 300
-  Check "Esc hides window" (-not [K]::IsWindowVisible($script:h))
-  Check "Esc saves immediately" ((FileText) -eq "$expected Esc前") (Esc (FileText))
+  # Esc in the Markdown editor reaches the window through WebView2: on the first start after a
+  # build that took longer than a fixed 300 ms (then the hotkey below hid the window again and
+  # three checks failed together). Wait for it, and say how long it took.
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  while ($clock.ElapsedMilliseconds -lt 3000 -and [K]::IsWindowVisible($script:h)) { Start-Sleep -Milliseconds 50 }
+  Check "Esc hides window" (-not [K]::IsWindowVisible($script:h)) "$($clock.ElapsedMilliseconds) ms"
+  $clock.Restart()
+  while ($clock.ElapsedMilliseconds -lt 2000 -and (FileText) -ne "$expected Esc前") { Start-Sleep -Milliseconds 50 }
+  Check "Esc saves immediately" ((FileText) -eq "$expected Esc前") "$($clock.ElapsedMilliseconds) ms after hiding: $(Esc (FileText))"
 
   # --- 3. Hotkey still works -----------------------------------------------------
   [K]::Combo(0x11, 0x10, 0x4D); Start-Sleep 1

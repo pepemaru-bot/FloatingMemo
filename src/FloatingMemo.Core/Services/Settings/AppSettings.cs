@@ -46,6 +46,9 @@ public sealed class AppSettings
     /// <summary>Whisper model file name (e.g. ggml-small.bin); null = the first installed (base before small). Applies after a restart.</summary>
     public string? WhisperModel { get; set; }
 
+    /// <summary>The speech recognizer for new recordings: null = Whisper (the default), "haas-ja" = Haas-ja (experimental).</summary>
+    public string? SpeechRecognizer { get; set; }
+
     /// <summary>AI minutes: Auto (speed on a CPU, quality on a GPU), Speed or Quality.</summary>
     public FloatingMemo.Services.Minutes.MinutesPriority MinutesPriority { get; set; } = FloatingMemo.Services.Minutes.MinutesPriority.Auto;
 }

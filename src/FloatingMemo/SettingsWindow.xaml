@@ -41,6 +41,21 @@
                     TextWrapping="Wrap" />
                 <Button Click="OnOpenModelsFolder" Content="モデルのフォルダを開く" />
                 <ComboBox
+                    x:Name="RecognizerBox"
+                    AutomationProperties.AutomationId="RecognizerBox"
+                    Header="音声認識のエンジン（次の録音から）"
+                    SelectionChanged="OnRecognizerChanged">
+                    <ComboBoxItem Content="Whisper（標準）" />
+                    <ComboBoxItem Content="Haas-ja（試験的・高速）" />
+                </ComboBox>
+                <TextBlock
+                    x:Name="RecognizerReport"
+                    AutomationProperties.AutomationId="RecognizerReport"
+                    FontSize="12"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    IsTextSelectionEnabled="True"
+                    TextWrapping="Wrap" />
+                <ComboBox
                     x:Name="WhisperBox"
                     AutomationProperties.AutomationId="WhisperBox"
                     Header="文字起こしのモデル（Whisper。再起動後に反映）"

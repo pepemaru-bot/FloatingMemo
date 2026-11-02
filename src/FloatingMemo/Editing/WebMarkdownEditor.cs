@@ -50,6 +50,15 @@ internal sealed class WebMarkdownEditor : IMemoEditor
     /// <summary>Focus moved into / out of the editor (used by test hooks).</summary>
     public event EventHandler<bool>? FocusChanged;
 
+    /// <summary>The page last reported that its editor has the keyboard (its own focus events).</summary>
+    public bool HasKeyboardFocus { get; private set; }
+
+    /// <summary>
+    /// XAML still counts the WebView as focused although the browser lost the keyboard (e.g. after
+    /// a control next to it was disabled): focusing it again would then do nothing.
+    /// </summary>
+    public bool IsFocusStale => !HasKeyboardFocus && _webView.FocusState != FocusState.Unfocused;
+
     /// <summary>The WebView2 process crashed: the page switches back to the plain editor.</summary>
     public event EventHandler? Failed;
 
@@ -308,7 +317,8 @@ internal sealed class WebMarkdownEditor : IMemoEditor
                 CompositionChanged?.Invoke(this, IsComposing);
                 break;
             case "focus":
-                FocusChanged?.Invoke(this, message["focused"]?.GetValueKind() == JsonValueKind.True);
+                HasKeyboardFocus = message["focused"]?.GetValueKind() == JsonValueKind.True;
+                FocusChanged?.Invoke(this, HasKeyboardFocus);
                 break;
             case "linkRequest":
                 LinkRequested?.Invoke(this, (Str(message, "text") is { Length: <= 1000 } t ? t : string.Empty,

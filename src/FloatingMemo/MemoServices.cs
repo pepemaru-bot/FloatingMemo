@@ -19,6 +19,9 @@ public sealed record MemoServices(
     Func<ILocalTextGenerator?> CreateMinutesModel,
     TermDictionary Dictionary)
 {
+    /// <summary>Haas-ja through speech.cpp (experimental); null when its files are not installed.</summary>
+    public SpeechCppTranscriptionService? Haas { get; init; }
+
     /// <summary>The user's minutes templates (stored next to the notes, never in the app folder).</summary>
     public TemplateLibrary Templates { get; } = new(TemplateLibrary.PathFor(Workspace.Library.MetaDirectory));
 }

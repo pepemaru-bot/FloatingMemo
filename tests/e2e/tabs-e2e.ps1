@@ -8,7 +8,7 @@ function NoteFile([string]$title) { Join-Path $NotesDir "notes\$title.md" }
 function ReadNote([string]$path) { if (Test-Path $path) { [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false)) } else { $null } }
 function WaitIdle($sec = 60) {
   $deadline = (Get-Date).AddSeconds($sec)
-  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 200 }
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 200 }
   $false
 }
 function NewestNote { Get-ChildItem (Join-Path $NotesDir 'notes') -Filter *.md -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 }

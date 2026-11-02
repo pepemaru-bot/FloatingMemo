@@ -18,6 +18,9 @@ public static class ModelLocations
     public const string WhisperFolder = "whisper";
     public const string QwenFolder = "qwen";
 
+    /// <summary>Haas-ja (experimental): speech.cpp's speech.exe and speech.dll, the Haas-ja GGUF and the Silero VAD GGUF.</summary>
+    public const string HaasFolder = "haas";
+
     /// <summary>&lt;app folder&gt;\models</summary>
     public static string AppModelsDirectory => Path.Combine(AppContext.BaseDirectory, "models");
 

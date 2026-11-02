@@ -48,6 +48,7 @@ public sealed partial class SettingsWindow : Window
         AccelerationBox.SelectedIndex = (int)services.Preferences.Acceleration;
         PriorityBox.SelectedIndex = (int)services.Preferences.MinutesPriority;
         ShowWhisperModels();
+        ShowRecognizer();
         ShowAccelerationReport();
         ClaritySlider.Value = Math.Round(services.Preferences.GlassClarity * 100);
         PaperSlider.Value = Math.Round(services.Preferences.PaperMilkiness * 100);
@@ -354,6 +355,30 @@ public sealed partial class SettingsWindow : Window
         WhisperReport.Text = (_whisperModels.Count == 0
             ? "Whisper のモデルが見つかりません（README の手順で models\\whisper に置いてください）。"
             : $"使用中: {inUse}（{(_services.Transcriber.IsModelLoaded ? "読み込み済み" : "最初の文字起こしで読み込み")}）") + pending;
+    }
+
+    /// <summary>Whisper (default) or Haas-ja (experimental, only when its files are installed).</summary>
+    private void ShowRecognizer()
+    {
+        bool haas = _services.Haas is not null;
+        _fillingWhisper = true;
+        RecognizerBox.SelectedIndex = haas && _services.Preferences.SpeechRecognizer == FloatingMemo.Services.Transcription.SpeechCppTranscriptionService.Id ? 1 : 0;
+        ((ComboBoxItem)RecognizerBox.Items[1]).IsEnabled = haas;
+        _fillingWhisper = false;
+        RecognizerReport.Text = haas
+            ? $"Haas-ja: {_services.Haas!.DisplayName}。録音の文字起こしを別のプロセス（speech.cpp）で行います。専門用語辞書で「認識のヒント」にした語を語彙として使います。試験的な機能です。"
+            : $"Haas-ja を使うには、speech.exe・speech.dll・Haas-ja の GGUF・Silero VAD の GGUF を models\\{FloatingMemo.Services.ModelLocations.HaasFolder} に置いてください（README）。";
+    }
+
+    private void OnRecognizerChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || _fillingWhisper || RecognizerBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _services.Preferences.SpeechRecognizer = RecognizerBox.SelectedIndex == 1 ? FloatingMemo.Services.Transcription.SpeechCppTranscriptionService.Id : null;
+        _services.Settings.TrySave(_services.Preferences);
     }
 
     private void OnWhisperChanged(object sender, SelectionChangedEventArgs e)

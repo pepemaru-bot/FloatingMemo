@@ -663,6 +663,26 @@
                     AutomationProperties.LiveSetting="Polite"
                     FontSize="12"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <!--
+                    Cancels the running transcription only (the record button always records).
+                    Not a tab stop: when the record button is briefly disabled, the keyboard focus
+                    must not land here (a Space typed for the memo would cancel the transcription).
+                -->
+                <Button
+                    x:Name="CancelTranscriptionButton"
+                    Width="22"
+                    Height="22"
+                    Padding="0"
+                    AllowFocusOnInteraction="False"
+                    IsTabStop="False"
+                    AutomationProperties.Name="文字起こしを中止"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Click="OnCancelTranscriptionClick"
+                    ToolTipService.ToolTip="文字起こしを中止（音声は残ります）"
+                    Visibility="Collapsed">
+                    <FontIcon FontSize="10" Glyph="&#xE711;" />
+                </Button>
             </StackPanel>
 
             <!--

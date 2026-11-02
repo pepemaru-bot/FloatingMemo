@@ -227,7 +227,21 @@ public sealed class FactMinutesTests
     [InlineData("約七割", "約7割")]
     [InlineData("三百万円", "3000000円")]
     [InlineData("二〇二六年", "2026年")]
+    [InlineData("30万円", "300000円")]
+    [InlineData("三十万円", "300000円")]
+    [InlineData("3万2千円", "32000円")]
+    [InlineData("三万二千円", "32000円")]
+    [InlineData("1万", "10000")]
+    [InlineData("十人", "10人")]
+    [InlineData("2026年10月", "2026年10月")]
+    [InlineData("万全です", "万全です")]
+    [InlineData("千葉支店", "千葉支店")]
+    [InlineData("百貨店", "百貨店")]
     public void KanjiNumerals_BecomeDigits(string kanji, string digits) => Assert.Equal(digits, Numerals.Arabic(kanji));
+
+    [Fact]
+    public void ThirtyManYen_IsNeverTheSameNumberAsThreeHundredYen() =>
+        Assert.NotEqual(Numerals.Arabic("300円"), Numerals.Arabic("30万円"));
 
     [Fact]
     public void Merge_SameStatementAsInfoAndDecision_IsOne_TopicsSharingASubjectAreOne()

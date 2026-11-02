@@ -80,6 +80,54 @@ public sealed class AudioRecorderTests : IDisposable
     }
 
     [Fact]
+    public async Task TheNextRecording_CanStart_WhileThePreviousOneIsStillBeingPrepared()
+    {
+        int session = 0;
+        var factory = new SyntheticCaptureFactory()
+            .With(AudioSources.Microphone, () => Stream(AudioSources.Microphone, Formats.DeviceFloatStereo48k, TimeSpan.Zero,
+                Tone(++session == 1 ? 0.5 : 1.2)));
+        using var recorder = new AudioRecorder(factory, _dir);
+
+        recorder.Start(AudioSources.Microphone, "note-A");
+        Assert.True(((SyntheticCaptureStream)factory.Created[0]).TimelineDelivered.Wait(TimeSpan.FromSeconds(10)));
+        var stoppedA = await recorder.StopCaptureAsync();
+        Assert.False(recorder.IsRecording); // free at once, before any conversion
+
+        // A's conversion is held until B has recorded: both happen at the same time.
+        using var holdA = new ManualResetEventSlim();
+        var preparingA = AudioRecorder.PrepareAsync(stoppedA, () => holdA.Wait(TimeSpan.FromSeconds(10)));
+        recorder.Start(AudioSources.Microphone, "note-B");
+        Assert.True(((SyntheticCaptureStream)factory.Created[1]).TimelineDelivered.Wait(TimeSpan.FromSeconds(10)));
+        holdA.Set();
+        var audioB = await recorder.StopAsync();
+        var audioA = await preparingA;
+
+        Assert.NotEqual(audioA.SessionDirectory, audioB.SessionDirectory);
+        Assert.InRange(audioA.Duration.TotalSeconds, 0.45, 0.55);
+        Assert.InRange(audioB.Duration.TotalSeconds, 1.15, 1.25);
+        Assert.Equal("note-A", RecordingManifest.Load(audioA.SessionDirectory)!.NoteId);
+        Assert.Equal("note-B", RecordingManifest.Load(audioB.SessionDirectory)!.NoteId);
+        Assert.Equal(RecordingStates.Prepared, RecordingManifest.Load(audioA.SessionDirectory)!.State);
+        Assert.Equal(RecordingStates.Prepared, RecordingManifest.Load(audioB.SessionDirectory)!.State);
+    }
+
+    [Fact]
+    public async Task APreparationFailure_AfterTheRecorderWasFreed_KeepsTheAudio()
+    {
+        var factory = new SyntheticCaptureFactory()
+            .With(AudioSources.Microphone, () => Stream(AudioSources.Microphone, Formats.Pcm16Mono44k, TimeSpan.Zero, Tone(0.3)));
+        using var recorder = new AudioRecorder(factory, _dir);
+        recorder.Start(AudioSources.Microphone);
+        Assert.True(((SyntheticCaptureStream)factory.Created[0]).TimelineDelivered.Wait(TimeSpan.FromSeconds(10)));
+        var stopped = await recorder.StopCaptureAsync();
+
+        var ex = await Assert.ThrowsAsync<RecordingSaveException>(() => AudioRecorder.PrepareAsync(stopped, () => throw new IOException("disk full")));
+        Assert.Equal(RecordingStates.Failed, RecordingManifest.Load(ex.SessionDirectory)!.State);
+        var recovered = await AudioRecorder.RecoverAsync(ex.SessionDirectory);
+        Assert.InRange(recovered.Duration.TotalSeconds, 0.25, 0.35);
+    }
+
+    [Fact]
     public async Task Microphone_RawTrackIsDeletedAndOnlyPreparedFileRemains()
     {
         var factory = new SyntheticCaptureFactory()

@@ -19,7 +19,7 @@ function Choose([string]$id) {
 }
 function WaitIdle($sec = 120) {
   $deadline = (Get-Date).AddSeconds($sec)
-  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 250 }
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 250 }
   $false
 }
 # A note without a transcript asks first; "メモだけで作成" goes ahead.

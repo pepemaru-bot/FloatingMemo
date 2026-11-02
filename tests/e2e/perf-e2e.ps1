@@ -2,7 +2,7 @@
 . (Join-Path $PSScriptRoot 'e2e-lib.ps1')
 function WaitIdle($sec = 60) {
   $deadline = (Get-Date).AddSeconds($sec)
-  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 200 }
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 200 }
   $false
 }
 function Mem { $p = Get-Process -Id $script:app.Id; [pscustomobject]@{ MB = [math]::Round($p.PrivateMemorySize64 / 1MB); Handles = $p.HandleCount } }

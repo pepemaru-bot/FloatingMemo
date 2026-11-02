@@ -8,6 +8,16 @@ Windows 11 用の、ローカルファーストなフローティングメモア
 メモは自動で Markdown ファイルに保存されます。録音の文字起こしから、PC 内の小さな AI（Qwen3）で
 議事録の下書きを作ることもできます（試作）。
 
+## v0.11.0 の概要
+
+| 項目 | 内容 |
+|---|---|
+| 機能 | ホットキーで呼び出すフローティングメモ／Markdown 自動保存・複数ノート／3 つの表示モード（ソース・ビジュアル・プレビュー）／録音（マイク・PC 音声）／ローカル文字起こし（Whisper、試験的に Haas-ja）／ローカル AI議事録（Qwen3、試作）／PDF・Word 書き出し |
+| v0.11.0 の変更 | 録音と AI 処理（文字起こし・議事録）を分離し、前の録音の処理中でも次の録音を始められるようにした（処理は永続キューで 1 件ずつ、再起動後に再開）。文字起こしの別エンジンとして Haas-ja（日本語専用、speech.cpp 経由、試験的・既定はオフ）を追加 |
+| 技術構成 | C# / .NET 10、WinUI 3（Windows App SDK）、WebView2 + CodeMirror 6 / Milkdown、NAudio、Whisper.net（whisper.cpp）、LLamaSharp（llama.cpp）、speech.cpp（任意）。詳細は [システム構成](#システム構成) |
+| 起動方法 | v0.11.0 はソースからビルドして起動します（[ソースからのビルド](#ソースからのビルド)）。Releases にあるビルド済み ZIP は v0.1.0 のみです |
+| 現状の制限 | AI議事録は下書き（必ず原文と照合）、Haas-ja は試験的、実行ファイルは未署名、WebView2 の通信あり、など。[既知の制限](#既知の制限) を参照 |
+
 ![Floating Memo の画面（背景の異なる 6 パターン。上段ライト・下段ダーク）](docs/screenshots/glass-v3-after.png)
 
 > [!IMPORTANT]
@@ -23,6 +33,7 @@ Windows 11 用の、ローカルファーストなフローティングメモア
 
 ## 目次
 
+- [v0.11.0 の概要](#v0110-の概要)
 - [コンセプトと開発の背景](#コンセプトと開発の背景)
 - [主な機能](#主な機能)
 - [動作環境](#動作環境)
@@ -72,8 +83,10 @@ Floating Memo は次の体験を目標にしています。
 | 表の挿入 | 表のボタンから 2×2・3×3・4×4 または任意の列数・行数を選んで挿入。ソース編集では GitHub 形式の表をカーソル位置に（前後の文章は崩さず、1 回の `Ctrl+Z` で元に戻せる）、ビジュアル編集では編集できる表として挿入 |
 | 自動保存 | 入力が 0.7 秒止まる・タブ切り替え・非表示・終了のたびに保存。一時ファイル→置換で書き込み、途中で落ちてもファイルが壊れない |
 | 外部編集の保護 | 他のエディタで同じファイルが変更されたら無警告で上書きしない（もう一方を別ファイルに残す） |
+| 録音と AI 処理の分離（v0.11.0） | 録音を止めた時点で次の録音を始められる。文字起こしと議事録は録音とは別の永続キュー（`ai-jobs.json`。ID・パス・状態だけで本文は入れない）で 1 件ずつ処理し、各録音の結果は録音を始めたノートに入る。終了・異常終了で中断した処理は次回起動時に再開。物理メモリの空きが足りなければ「メモリの空き待ち」で待機 |
 | 録音 | マイク / PC で再生中の音（WASAPI ループバック）/ その両方。入力デバイスの選択、アイコン一体型の音量表示、マイク入力テスト。長時間録音は約 45 分ごとに分けて保存（WAV の 4 GB の上限で止まらない）。保存や処理に失敗しても録音を消さず、次回起動時に「文字起こしする／削除する」を選べる |
 | ローカル文字起こし | 録音停止後、PC 内の Whisper（whisper.cpp）で文字起こしし、録音を始めたノートの末尾に追加。無音区間は Whisper に渡さず、無音での反復（ハルシネーション）を抑制。音声は 10 分ずつ処理するので長い録音でもメモリを使いすぎず、途中で失敗・中止しても続きから再開できる。進捗を % で表示。使う Whisper モデル（base / small）を設定で選べる |
+| 文字起こしの別エンジン: Haas-ja（試験的） | 設定の「音声認識のエンジン」で Whisper の代わりに Haas-ja-v1.0（日本語専用）を選べる。speech.cpp（`speech.exe`）を別プロセスで実行し、異常終了してもアプリ・録音に影響しない。モデルと speech.cpp は同梱せず、ユーザーが配置（[2b](#2b-文字起こしの別エンジン-haas-ja任意試験的)）。見つからないときに Whisper へ自動で切り替えることはしない |
 | AI議事録（試作） | 文字起こしノートから、PC 内の Qwen3（llama.cpp）で議事録の下書きを作り、別ノートに保存。原文は変更しない。Qwen3 4B では、先に原文から根拠付きの事実を抜き出して検査し、話題ごとの見出しで書く（内部では各項目に原文の番号を付けて検査し、保存するノートでは根拠を脚注〔[^1]: 原文: 「…」〕として示す。末尾の番号付き原文でも確かめられる。1.7B は 7 つの固定見出し）。根拠の文が内容を支えているか、決定と未決が入れ替わっていないかを機械的に照合し、確かでないものは【決定】にせず【要確認】として理由を示す |
 | 議事録テンプレート | 見出しと書き方を Markdown（`## 見出し` と説明）か JSON で読み込み、議事録の形式として選べる（未選択なら「おまかせ」）。読み込み前に見出しの一覧を確認でき、形式が違う JSON には足りない項目と書き方を表示（自動変換はしない）。テンプレートはデータとして扱い、この PC のノートのフォルダにだけ保存。サンプル: [docs/templates](docs/templates)（架空） |
 | AI議事録の取りこぼし対策（AIハーネス v1） | AI に一度書かせて終わりにせず、アプリが各段階を確かめる: 回答が長さの上限で途中で終わった部分は続きだけを抽出し直す／根拠番号のずれは、近くの文で全部の検査を通った場合だけ補正する／見出しへの割り当てで漏れた事実を聞き直す／どの事実にも使われなかった発言や、1 文の片方だけ使われた発言を読み直す。各事実がどの段階で残り・除かれたかを記録する（診断ログには件数だけ） |
@@ -101,6 +114,10 @@ Floating Memo は次の体験を目標にしています。
 ノート PC など、開発 PC より遅い環境では処理時間が長くなります。
 
 ## インストール（ポータブル版）
+
+> [!NOTE]
+> Releases に置いているビルド済み ZIP は v0.1.0（初回公開）のものです。v0.11.0 の機能を使う場合は [ソースからのビルド](#ソースからのビルド) で起動するか、
+> `scripts\build-portable.ps1` でポータブル版を作成してください（展開後の手順は下と同じ）。
 
 1. [Releases](https://github.com/pepemaru-bot/FloatingMemo/releases) から `FloatingMemo-Portable-v<バージョン>-x64.zip`（例: `FloatingMemo-Portable-v0.1.0-x64.zip`、約 121MB）をダウンロードします。
 2. ZIP を右クリック →［プロパティ］→［許可する］にチェック →［OK］（SmartScreen の警告を減らすため。任意）。
@@ -166,6 +183,21 @@ FloatingMemo-Portable-v0.1.0-x64\
 ページの「Files and versions」で上記のファイル名の行のダウンロードボタン（↓）を押します。
 SHA-256 は Hugging Face の各ファイルのページにも表示されます（配布元で更新された場合は値が変わることがあります）。
 ほかの量子化（Q4_K_M 以外の 4B、8B など）の `.gguf` も一覧には出ますが、上の 2 つ以外は未評価です。
+
+### 2b. 文字起こしの別エンジン: Haas-ja（任意・試験的）
+
+Whisper の代わりに、Third Intelligence の Haas-ja-v1.0（日本語専用、Apache 2.0）を speech.cpp（MIT）経由で使えます。既定は Whisper のままです。
+
+| ファイル | 配布元 |
+|---|---|
+| `speech.exe`、`speech.dll`（speech.cpp v0.10.0、Windows x64 Vulkan 版） | https://github.com/nyosegawa/speech.cpp/releases/tag/v0.10.0（SHA-256 はリリースの `SHA256SUMS` と照合） |
+| `Haas-616M-ja-v1.0-Q8_0.gguf`（0.66 GB）または `-Q4_K.gguf`（0.35 GB） | https://huggingface.co/sakasegawa/Haas-ja-v1.0-GGUF（リビジョン `6b965d5`） |
+| `silero-vad-309K-v6.2-F32.gguf`（1.2 MB） | https://huggingface.co/sakasegawa/silero-vad-GGUF |
+
+- 4つとも `models\haas` に置き、設定の「音声認識のエンジン」で Haas-ja を選ぶと、次の録音から使われます。
+- 文字起こしは別のプロセス（speech.exe）で動くため、異常終了しても録音やメモには影響しません。
+- 専門用語辞書で「Whisper のヒントにも使う」にした語（読みがあれば「表記=よみ」）を、Haas-ja の語彙として使います。
+- `speech.exe` にはコード署名がありません。会社の PC では IT 部門の規程に従ってください。
 
 ### 3. 配置後のフォルダ構成と確認
 
@@ -262,7 +294,7 @@ Get-FileHash .\models\qwen\Qwen3-4B-Q4_K_M.gguf -Algorithm SHA256
 | ノートの管理情報・辞書・テンプレート | `%USERPROFILE%\FloatingMemo\.floatingmemo\` | ID 対応表・開いているタブ（本文は含まない）、専門用語辞書 `dictionary.json`、議事録テンプレート `templates\*.json` |
 | 設定 | `%LOCALAPPDATA%\FloatingMemo\settings.json` | 位置・サイズ・録音の選択など。本文は含まない |
 | エディタのキャッシュ | `%LOCALAPPDATA%\FloatingMemo\WebView2\` | WebView2 のデータ |
-| 録音の一時ファイル | `%TEMP%\FloatingMemo\recordings\` | 文字起こし成功後すぐ削除。失敗・中止したものは消さずに残し、次回起動時に文字起こしするか削除するかを確認 |
+| 録音の一時ファイル・AI処理のキュー | `%TEMP%\FloatingMemo\recordings\`（キューは同じフォルダの `ai-jobs.json`） | 録音は、文字起こしがノートに保存されたことを確認してから削除。失敗・中止したものは消さずに残し、次回起動時に文字起こしするか削除するかを確認。キューには ID・パス・状態だけを保存 |
 | 診断ログ | `%TEMP%\FloatingMemo\transcription-diagnostics.log`、`minutes-diagnostics.log` | 文字数・分割範囲・処理時間などの数値と短いハッシュのみ（本文・音声・名前は書かない） |
 | クラッシュログ | `%TEMP%\FloatingMemo\crash.log` | 例外の種類・メッセージのみ |
 
@@ -281,20 +313,25 @@ flowchart LR
     subgraph Core["FloatingMemo.Core（UI 非依存・単体テスト対象）"]
         Notes["ノート管理・安全な保存<br/>NoteWorkspace / NoteStorageService"]
         Audio["録音<br/>NAudio WASAPI"]
+        Jobs["AI処理のキュー<br/>AiJobQueue（1 件ずつ・再開可能）"]
         Whisper["文字起こし<br/>Whisper.net（whisper.cpp）"]
+        Haas["文字起こし（試験的）<br/>speech.cpp 別プロセス + Haas-ja"]
         Minutes["校正・議事録<br/>LLamaSharp（llama.cpp）+ 検査"]
         Dict["専門用語辞書"]
     end
     Disk[("Markdown ファイル<br/>%USERPROFILE%\FloatingMemo")]
-    Models[("モデル（ユーザーが配置）<br/>models\whisper / models\qwen")]
+    Models[("モデル（ユーザーが配置）<br/>models\whisper / models\qwen / models\haas")]
 
     Hotkey --> Window --> Editor
     Window --> Notes --> Disk
-    Window --> Audio --> Whisper --> Notes
-    Window --> Minutes --> Notes
+    Window --> Audio --> Jobs
+    Jobs --> Whisper --> Notes
+    Jobs -.-> Haas -.-> Notes
+    Jobs --> Minutes --> Notes
     Dict --> Minutes
     Models -.-> Whisper
     Models -.-> Minutes
+    Models -.-> Haas
     Window --> Export
 ```
 
@@ -331,6 +368,7 @@ flowchart TD
 | エディタ | Microsoft Edge WebView2 + CodeMirror 6（同梱、MIT） |
 | 録音 | NAudio 3.1（WASAPI キャプチャ / ループバック） |
 | 文字起こし | Whisper.net 1.9.1（whisper.cpp、CPU / Vulkan） |
+| 文字起こし（試験的・任意） | speech.cpp v0.10.0（別プロセス）+ Haas-ja-v1.0 GGUF、Silero VAD |
 | AI議事録 | LLamaSharp 0.27.0（llama.cpp、CPU / Vulkan）+ Qwen3 GGUF |
 | 書き出し | Markdig 1.4.0、DocumentFormat.OpenXml 3.5.1、WebView2 PrintToPdf |
 | テスト | xUnit、PowerShell + UI オートメーションによる E2E |
@@ -397,7 +435,15 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\run-e2e.ps1
 powershell -ExecutionPolicy Bypass -File tests\e2e\portable-smoke.ps1 -Exe <フォルダ>\FloatingMemo.exe
 ```
 
-最新（main、2026-10-26）の結果:
+v0.11.0（2026-11-01〜02）の結果:
+
+| テスト | 結果 |
+|---|---|
+| 単体テスト（xUnit） | 407 件合格、16 件スキップ（実モデル・実デバイス・GPU が必要な計測・調査用） |
+| E2E | 新しい jobs スイート 29 項目合格（前の録音の処理中に次の録音を開始・3 件連続録音で各ノートに自分の文字起こしだけ・強制終了後の再開で二重追加なし）、haas スイート合格。modes スイート（ビジュアル編集の表の挿入・ドラッグ）は不安定で、変更前のコミットでも同じく失敗する既知の問題 |
+| 文字起こしの比較（架空の会議・ホールドアウト） | Haas-ja は h03 で文字誤り率 4.2%（Whisper＋ヒント 8.2%）、用語 15/15（同 4/15）。ただし言い直しを含む h01 では議事録の重要事項が減った（[結果](docs/evaluation/sprint-20261101-recording-haas.md)） |
+
+v0.9.0（2026-10-26）の結果:
 
 | テスト | 結果 |
 |---|---|
@@ -442,6 +488,12 @@ v0.1.0（2026-10-15）の結果:
   架空の長い会議（発言が密なもの）では、重要事実の網羅率が v0.5.0 の 79%（GPU）／63%（CPU）から 95%／84% に上がり、
   未決を決定と書いた件数とテンプレートの説明文の混入はどの条件でも 0 件でしたが、少数の架空データでの結果であり、誤りがないことを保証するものではありません。
   1 文に 2 つの情報があるとき、片方だけが抽出されることがあります。
+- **Haas-ja は試験的**: 「12月7日、あ、すみません、12月14日」のような言い直しが途中で区切られ、訂正前の内容が議事録で事実として扱われることがあります。
+  数字の表記が崩れることもあります。`speech.exe` は未署名のため、会社の PC ではセキュリティ設定で実行が止められることがあります（その場合は Whisper を使ってください）。
+  NVIDIA 以外の GPU での動作は未確認です。
+- **録音の一時保存先**: 処理待ちの録音は `%TEMP%` に置くため、Windows のストレージ センサーなどの一時ファイル削除で消える可能性があります。
+  音声を認識できなかった（結果が空の）録音は削除されます。
+- **ビジュアル編集の E2E**: 表の挿入・リストのドラッグの自動テストが不安定です（原因未特定）。
 - **長時間録音**: 分割保存と失敗時の復元は自動テスト（小さく分けた疑似データ）で確かめたもので、3〜6 時間の実際の録音での確認はまだです。
 - **リアルタイム文字起こしは未対応**: 録音停止後にまとめて処理します。長い録音ほど時間がかかります。
 - **GPU**: GPU での動作確認は 1 台の PC でしかしていません。多くの GPU・ドライバーの組み合わせは未検証です。GPU で始められないときは自動で CPU に切り替えます。設定の変更はアプリの再起動後に反映されます。
@@ -483,6 +535,7 @@ Claude Code への指示書（[CLAUDE.md](CLAUDE.md)、[PHASE1_START.md](PHASE1_
 | コンポーネント | ライセンス |
 |---|---|
 | Whisper.net / whisper.cpp | MIT |
+| speech.cpp（同梱しない。Haas-ja を使う場合にユーザーが配置） | MIT |
 | LLamaSharp / llama.cpp | MIT |
 | NAudio | MIT |
 | CodeMirror 6 / Lezer ほか（`src/FloatingMemo/Editor/vendor/`） | MIT（各フォルダに LICENSE） |
@@ -497,6 +550,6 @@ Claude Code への指示書（[CLAUDE.md](CLAUDE.md)、[PHASE1_START.md](PHASE1_
 Microsoft のコンポーネントを含む配布物を使うことで、それらのライセンス条項にも同意したものとみなされます。
 
 AI モデルは配布物に含まれません。ユーザーがダウンロードするモデルのライセンスは配布元に従います
-（Whisper: MIT ／ Qwen3: Apache License 2.0）。
+（Whisper: MIT ／ Qwen3: Apache License 2.0 ／ Haas-ja-v1.0: Apache License 2.0 ／ Silero VAD: MIT）。
 
 「Microsoft」「Windows」「Edge」は Microsoft グループの商標です。本アプリは Microsoft・OpenAI・Alibaba Cloud とは無関係です。

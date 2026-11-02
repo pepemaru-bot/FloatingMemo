@@ -46,7 +46,7 @@ Get-ChildItem (Join-Path $app 'runtimes\vulkan') -Directory -ErrorAction Silentl
 Get-ChildItem $app -Recurse -File -Filter *.pdb | Remove-Item -Force
 
 # Empty model folders with instructions: the app finds models placed here (see ModelLocations.cs).
-foreach ($kind in 'whisper', 'qwen') {
+foreach ($kind in 'whisper', 'qwen', 'haas') {
     New-Item -ItemType Directory -Force (Join-Path $app "models\$kind") | Out-Null
 }
 Copy-Item (Join-Path $PSScriptRoot 'portable\models\README_MODELS.txt') (Join-Path $app 'models\README_MODELS.txt')

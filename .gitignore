@@ -86,3 +86,7 @@ Desktop.ini
 
 # ===== Portable distribution output (binaries + model; never committed) =====
 /dist/
+
+# Python bytecode (tests/asr/eval)
+__pycache__/
+*.pyc

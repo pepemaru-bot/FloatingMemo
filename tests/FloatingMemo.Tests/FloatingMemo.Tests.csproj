@@ -23,4 +23,9 @@
     <ProjectReference Include="..\..\src\FloatingMemo.Core\FloatingMemo.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The spoken made-up meetings (reference transcripts) for AsrMinutesCases. -->
+    <None Include="..\asr\eval\*.json" Link="asr-eval\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

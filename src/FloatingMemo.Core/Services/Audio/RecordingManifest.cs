@@ -20,6 +20,9 @@ public static class RecordingStates
 
     /// <summary>Kept for the user to retry (e.g. transcription failed and the app was closed).</summary>
     public const string Kept = "kept";
+
+    /// <summary>The transcript is saved in its note; only deleting the audio was left.</summary>
+    public const string Delivered = "delivered";
 }
 
 /// <summary>One source of a session: its segment files (names only) and where it starts on the timeline.</summary>
@@ -74,6 +77,14 @@ public sealed class RecordingManifest
         {
             return null; // damaged: the audio files are still found by name
         }
+    }
+
+    /// <summary>Marks a session whose transcript is saved in its note (before its audio is deleted).</summary>
+    public static void MarkDelivered(string sessionDirectory)
+    {
+        var manifest = Load(sessionDirectory) ?? new RecordingManifest { Created = DateTime.Now };
+        manifest.State = RecordingStates.Delivered;
+        manifest.TrySave(sessionDirectory);
     }
 
     /// <summary>Saves next to the audio. Never throws: the manifest helps recovery but is not required for it.</summary>

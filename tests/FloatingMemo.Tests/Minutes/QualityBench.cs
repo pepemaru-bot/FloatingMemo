@@ -227,9 +227,51 @@ public static partial class QualityBench
     [GeneratedRegex(@"[0-9]+")]
     private static partial Regex Digits();
 
-    private static string N(string s) => Numerals.Arabic(MinutesValidator.Normalize(s));
+    // Numbers in one form: 三万二千円, 3万2千円, 3万2000円 and 32,000円 all become 32000円.
+    // Digits mixed with 万/千 are read here first: Numerals.Arabic alone turns the 万 of 3万 into 0.
+    // A spoken decimal (五十六点四 = 56点4) reads as the written one (56.4); Normalize drops the point.
+    private static string N(string s) =>
+        SpokenDecimal().Replace(Numerals.Arabic(MixedNumber().Replace(MinutesValidator.Normalize(s), m => MixedValue(m.Value).ToString())), "$1$2");
+
+    [GeneratedRegex(@"(\d+)点(\d)(?!\d)")]
+    private static partial Regex SpokenDecimal();
+
+    private static long MixedValue(string text)
+    {
+        long total = 0, section = 0, number = 0;
+        foreach (char c in text)
+        {
+            int d = c is >= '0' and <= '9' ? c - '0' : "〇一二三四五六七八九".IndexOf(c);
+            if (d >= 0)
+            {
+                number = (number * 10) + d;
+            }
+            else if (c == '万')
+            {
+                total += (section + number) * 10000;
+                section = number = 0;
+            }
+            else
+            {
+                section += (number == 0 ? 1 : number) * (c switch { '十' => 10, '百' => 100, _ => 1000 });
+                number = 0;
+            }
+        }
+
+        return total + section + number;
+    }
+
+    // A number written with digits and 十/百/千/万 together (3万2千, 4千500, 30万).
+    [GeneratedRegex(@"(?=[〇一二三四五六七八九十百千万]*[0-9])(?=[0-9〇一二三四五六七八九]*[十百千万])[0-9〇一二三四五六七八九十百千万]+")]
+    private static partial Regex MixedNumber();
 
     private static bool HasAll(string text, IEnumerable<string> words) => words.All(w => N(text).Contains(N(w), StringComparison.Ordinal));
+
+    /// <summary>The source of the case contains the word, as the scorer compares them.</summary>
+    internal static bool SourceHas(BenchCase c, string word) => N(c.Transcript).Contains(N(word), StringComparison.Ordinal);
+
+    /// <summary>The written text contains the keyword, as the scorer compares them.</summary>
+    internal static bool SameWords(string text, string keyword) => HasAll(text, [keyword]);
 
     /// <summary>Scores a draft (the generator's Markdown, with 〔B012〕 citations and the numbered source).</summary>
     public static BenchScore Score(BenchCase c, string markdown, double seconds = 0, long peakMb = 0)

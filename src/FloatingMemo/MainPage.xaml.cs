@@ -5,6 +5,7 @@ using FloatingMemo.Services;
 using FloatingMemo.Services.Audio;
 using FloatingMemo.Services.Dictionary;
 using FloatingMemo.Services.Export;
+using FloatingMemo.Services.Jobs;
 using FloatingMemo.Services.Minutes;
 using FloatingMemo.Services.Notes;
 using FloatingMemo.Services.Transcription;
@@ -26,17 +27,17 @@ using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 
 namespace FloatingMemo;
 
-/// <summary>Where the memo is in the record → transcribe cycle.</summary>
+/// <summary>
+/// The recorder's state only. Speech recognition and minutes are AI jobs in their own queue
+/// (<see cref="AiJobQueue"/>): they never keep the user from starting the next recording.
+/// </summary>
 public enum VoiceState
 {
     Idle,
     Recording,
 
-    /// <summary>Stopping devices and converting audio (short).</summary>
+    /// <summary>Stopping the devices and closing the files (at most a few seconds).</summary>
     Processing,
-
-    /// <summary>Local Whisper is turning the audio into text.</summary>
-    Transcribing,
 }
 
 /// <summary>
@@ -80,14 +81,18 @@ public sealed partial class MainPage : Page
     private WebMarkdownEditor? _markdownEditor;
     private IMemoEditor _editor;
     private LocalWhisperTranscriptionService? _transcriber;
-    private CancellationTokenSource? _transcriptionCts;
 
-    // The note a recording belongs to: fixed when recording starts, so the transcript goes
-    // there even if the user switches or closes tabs in the meantime.
+    // The note the current recording belongs to: fixed when recording starts. Its transcription
+    // job keeps it, so the transcript goes there even if the user switches or closes tabs.
     private string? _recordingNoteId;
 
-    // Audio whose transcription failed or was cancelled, kept so the user can retry.
-    private RecordedAudio? _pendingAudio;
+    // Speech recognition and minutes, one job at a time, apart from recording (saved, so they
+    // continue after a restart).
+    private AiJobQueue? _jobs;
+
+    // Recordings of this run whose capture stopped but whose transcription WAV is not made yet:
+    // their job makes it from the closed files (after a restart it is recovered from disk).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, StoppedRecording> _stopped = new(StringComparer.OrdinalIgnoreCase);
 
     public MainPage()
     {
@@ -146,6 +151,16 @@ public sealed partial class MainPage : Page
     /// </summary>
     public bool IsComposing => _editor.IsComposing;
 
+    /// <summary>
+    /// The editor lost the keyboard to something outside XAML's view (a native model loading):
+    /// the window re-activates itself if it is in front, which gives the keys back to the editor.
+    /// </summary>
+    public event EventHandler? RefocusRequested;
+
+    /// <summary>The Markdown editor is in use and XAML's focus is on its WebView (or nowhere).</summary>
+    public bool EditorWebViewHasXamlFocus => ReferenceEquals(_editor, _markdownEditor) && XamlRoot is not null
+        && FocusManager.GetFocusedElement(XamlRoot) is var focused && (focused is null || focused == EditorWebView);
+
     /// <summary>Esc was pressed inside the Markdown editor (the window's accelerator cannot see it).</summary>
     public event EventHandler? HideRequested;
 
@@ -197,7 +212,21 @@ public sealed partial class MainPage : Page
         _workspace.TabsChanged += (_, _) => RenderTabs();
         _workspace.ActiveChanged += (_, _) => ShowActiveNote();
         _workspace.Restore();
+
+        // AI jobs (also those left unfinished by the last run) start once the notes are there.
+        _jobs = new AiJobQueue(services.Recorder.WorkDirectory, RunJobAsync, SystemMemory.Instance, RequiredMegabytes);
+        _jobs.Changed += (_, _) => DispatcherQueue.TryEnqueue(OnJobsChanged);
+        _jobs.Start();
     }
+
+    /// <summary>
+    /// Stops the AI jobs (exiting). A running job stops at its next safe point and is resumed at
+    /// the next start; nothing that was recorded is deleted.
+    /// </summary>
+    public void StopJobs() => _jobs?.Dispose();
+
+    /// <summary>Unfinished AI jobs (transcriptions and minutes waiting or running).</summary>
+    public int UnfinishedJobs => _jobs?.Unfinished ?? 0;
 
     /// <summary>Moves keyboard focus to the editor, keeping the caret position.</summary>
     public void FocusEditor()
@@ -341,6 +370,7 @@ public sealed partial class MainPage : Page
     private TextBlock? _testMirrorProbe;
     private TextBlock? _testMirrorLevels;
     private TextBlock? _testMirrorCaret;
+    private TextBlock? _testMirrorJobs;
     private bool _testEditorFocus;
 
     private void CreateTestMirrors()
@@ -361,6 +391,7 @@ public sealed partial class MainPage : Page
         _testMirrorProbe = Make("EditorProbe");
         _testMirrorLevels = Make("LevelMirror");
         _testMirrorCaret = Make("EditorCaret");
+        _testMirrorJobs = Make("AiJobsState");
 
         // Lets the leak test tell real leaks from handles that are only waiting for a GC.
         var gc = new Button { Opacity = 0, Width = 1, Height = 1, IsTabStop = false };
@@ -418,6 +449,10 @@ public sealed partial class MainPage : Page
         AutomationProperties.SetName(_testMirrorCaret!, _markdownEditor?.CaretColor ?? string.Empty);
         bool focused = web ? _testEditorFocus : XamlRoot is not null && ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), MemoTextBox);
         AutomationProperties.SetName(_testMirrorFocus!, focused ? "focused" : "blurred");
+        // "unfinished=N failed=N running=Kind": tests wait for the AI jobs with this.
+        var jobs = _jobs?.Snapshot() ?? [];
+        AutomationProperties.SetName(_testMirrorJobs!,
+            $"unfinished={jobs.Count(j => j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted)} failed={jobs.Count(j => j.State == AiJobState.Failed)} running={jobs.FirstOrDefault(j => j.State == AiJobState.Running)?.Kind.ToString() ?? "none"}");
 #endif
     }
 
@@ -473,27 +508,17 @@ public sealed partial class MainPage : Page
         return false;
     }
 
-    /// <summary>Stops any recording/transcription and discards the audio (used when exiting).</summary>
+    /// <summary>
+    /// Exiting: discards a recording in progress (the user confirmed that) and stops the AI jobs.
+    /// Recordings that were already stopped keep their jobs and are transcribed at the next start.
+    /// </summary>
     public void DiscardRecording()
     {
-        // Recording or transcribing: the user confirmed discarding that audio. Audio that was
-        // only waiting for a retry is kept and offered again at the next start.
-        bool discardPending = VoiceState == VoiceState.Transcribing;
-        _minutesCts?.Cancel();
         StopMicrophoneTest();
         _recordingClock.Stop();
         _recorder?.Cancel();
-        _transcriptionCts?.Cancel();
-        if (discardPending)
-        {
-            _pendingAudio?.Delete();
-        }
-        else
-        {
-            _pendingAudio?.Keep();
-        }
-
-        _pendingAudio = null;
+        _closing = true;
+        StopJobs();
         SetVoiceState(VoiceState.Idle);
     }
 
@@ -940,7 +965,6 @@ public sealed partial class MainPage : Page
 
     // ----- AI minutes (local LLM) ---------------------------------------------------------
 
-    private CancellationTokenSource? _minutesCts;
     private const string MinutesTitle = "AI議事録を作成中";
 
     private enum MinutesOutcome
@@ -980,7 +1004,7 @@ public sealed partial class MainPage : Page
     /// <summary>"議事録 校正 1/2 0:12 230字": the step, its part, elapsed time, characters written.</summary>
     private void UpdateMinutesIndicator()
     {
-        if (_minutesCts is null)
+        if (_minutesJobId is null)
         {
             return;
         }
@@ -1030,7 +1054,7 @@ public sealed partial class MainPage : Page
         clear.IsRepeating = false;
         clear.Tick += (_, _) =>
         {
-            if (_minutesCts is null)
+            if (_minutesJobId is null && !MinutesBusy)
             {
                 MinutesIndicator.Visibility = Visibility.Collapsed;
                 UpdateControlBarEmphasis();
@@ -1067,8 +1091,8 @@ public sealed partial class MainPage : Page
 
         var create = new MenuFlyoutItem
         {
-            Text = _minutesCts is null ? "このノートからAI議事録を作成" : "AI議事録を作成中…",
-            IsEnabled = active is not null && !isMinutes && _minutesCts is null,
+            Text = MinutesBusy ? "AI議事録を作成中…" : "このノートからAI議事録を作成",
+            IsEnabled = active is not null && !isMinutes && !MinutesBusy,
         };
         AutomationProperties.SetAutomationId(create, "MinutesCreate");
         create.Click += async (_, _) => await CreateMinutesAsync();
@@ -1173,141 +1197,273 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
-    /// Makes a minutes draft from the open note with the local LLM and saves it as a new note
-    /// next to it. The transcript itself is never changed; the user reviews the draft.
+    /// Queues minutes of the open note (local LLM, saved as a new note next to it). The job runs
+    /// after the AI jobs before it, so a transcription of this note that is still waiting or
+    /// running lands in the note first. The transcript itself is never changed.
     /// </summary>
     /// <param name="withoutTranscript">The user confirmed making minutes from a note that has no transcript.</param>
     private async Task CreateMinutesAsync(bool withoutTranscript = false)
     {
-        if (_workspace?.Active is not { } source || _services is null || _minutesCts is not null)
+        if (_workspace?.Active is not { } source || _services is null || _jobs is null || MinutesBusy)
         {
             return;
         }
 
-        // The transcript is added only after recording, audio preparation and transcription have
-        // all finished. Starting earlier summarizes the note without it (input silently missing).
-        if (VoiceState != VoiceState.Idle)
+        // The recording of this note is not transcribed yet (it may not even be stopped):
+        // starting now would summarize the note without it (input silently missing).
+        if (VoiceState != VoiceState.Idle && _recordingNoteId == source.Id)
         {
             ShowAudioMessage(InfoBarSeverity.Warning, "録音と文字起こしが終わってから作成してください",
                 "文字起こしがノートに追加される前に作成すると、文字起こしの内容が議事録に入りません。");
             return;
         }
 
-        if (_transcriptsWaitingForIme.Count > 0 || IsComposing)
+        bool transcriptComing = _jobs.Snapshot().Any(j => j.Kind == AiJobKind.Transcribe && j.NoteId == source.Id
+            && j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted);
+        if (!transcriptComing)
         {
-            ShowAudioMessage(InfoBarSeverity.Warning, "日本語入力の変換を確定してください",
-                "変換中のため、届いた文字起こしをまだノートに追加していません。確定してから作成してください。");
-            return;
-        }
-
-        // The latest keystrokes belong to the transcript that is summarized.
-        _autosaveTimer.Stop();
-        if (!await _editor.FlushAsync())
-        {
-            ShowAudioMessage(InfoBarSeverity.Warning, "エディタの内容を確認できませんでした",
-                "最新の本文を受け取れなかったため作成していません。少し待ってからもう一度お試しください。");
-            return;
-        }
-
-        if (source.IsDirty)
-        {
-            HandleSaveResult(await _workspace.SaveAsync(source));
-        }
-
-        string transcript = source.Text;
-        if (transcript.Trim().Length < 20)
-        {
-            ShowAudioMessage(InfoBarSeverity.Warning, "原文が短すぎます", "文字起こしのあるノートで作成してください。");
-            return;
-        }
-
-        // A note without any "以下、AIによる文字起こし" block: say so instead of quietly making
-        // minutes from the person's notes alone.
-        var snapshot = MinutesInputSnapshot.Of(source.Id, transcript);
-        if (!snapshot.HasTranscript && !withoutTranscript)
-        {
-            var anyway = new Button { Content = "メモだけで作成" };
-            AutomationProperties.SetAutomationId(anyway, "MinutesWithoutTranscript");
-            anyway.Click += async (_, _) =>
+            if (_transcriptsWaitingForIme.Count > 0 || IsComposing)
             {
-                AudioInfoBar.IsOpen = false;
-                await CreateMinutesAsync(withoutTranscript: true);
-            };
-            ShowAudioMessage(InfoBarSeverity.Warning, "このノートには文字起こしがありません",
-                "「以下、AIによる文字起こし」の部分が見つかりません。録音の文字起こしが別のノートに入っていないか確認してください。"
-                + "手で書いたメモだけから作る場合は「メモだけで作成」を押してください。", anyway);
-            return;
+                ShowAudioMessage(InfoBarSeverity.Warning, "日本語入力の変換を確定してください",
+                    "変換中のため、届いた文字起こしをまだノートに追加していません。確定してから作成してください。");
+                return;
+            }
+
+            // The latest keystrokes belong to the transcript that is summarized.
+            _autosaveTimer.Stop();
+            if (!await _editor.FlushAsync())
+            {
+                ShowAudioMessage(InfoBarSeverity.Warning, "エディタの内容を確認できませんでした",
+                    "最新の本文を受け取れなかったため作成していません。少し待ってからもう一度お試しください。");
+                return;
+            }
+
+            if (source.IsDirty)
+            {
+                HandleSaveResult(await _workspace.SaveAsync(source));
+            }
+
+            if (source.Text.Trim().Length < 20)
+            {
+                ShowAudioMessage(InfoBarSeverity.Warning, "原文が短すぎます", "文字起こしのあるノートで作成してください。");
+                return;
+            }
+
+            // A note without any "以下、AIによる文字起こし" block: say so instead of quietly making
+            // minutes from the person's notes alone.
+            if (!MinutesInputSnapshot.Of(source.Id, source.Text).HasTranscript && !withoutTranscript)
+            {
+                var anyway = new Button { Content = "メモだけで作成" };
+                AutomationProperties.SetAutomationId(anyway, "MinutesWithoutTranscript");
+                anyway.Click += async (_, _) =>
+                {
+                    AudioInfoBar.IsOpen = false;
+                    await CreateMinutesAsync(withoutTranscript: true);
+                };
+                ShowAudioMessage(InfoBarSeverity.Warning, "このノートには文字起こしがありません",
+                    "「以下、AIによる文字起こし」の部分が見つかりません。録音の文字起こしが別のノートに入っていないか確認してください。"
+                    + "手で書いたメモだけから作る場合は「メモだけで作成」を押してください。", anyway);
+                return;
+            }
         }
 
-        if (_services.CreateMinutesModel() is not { } model)
+        if (_services.CreateMinutesModel() is not { } probe)
         {
             ShowAudioMessage(InfoBarSeverity.Warning, "AIモデルがありません",
                 $"Qwen3 の GGUF モデル（{string.Join(" / ", LlamaTextGenerator.KnownModels)}）を README の手順でダウンロードして {LlamaTextGenerator.ModelsDirectory} に置いてください。メモの編集・保存・書き出しはモデルなしで使えます。");
             return;
         }
 
-        var cts = new CancellationTokenSource();
-        _minutesCts = cts;
-        var cancel = new Button { Content = "中止" };
-        AutomationProperties.SetAutomationId(cancel, "MinutesCancel");
-        cancel.Click += (_, _) => cts.Cancel();
-        // Step 1 (optional): correct misrecognitions with the dictionary and the context.
-        // Step 2: write the minutes from the corrected text. Separate prompts, same local model.
-        IReadOnlyList<TermEntry>? dictionary = _services.Preferences.CorrectTranscriptBeforeMinutes ? _services.Dictionary.ActiveEntries : null;
-        ShowAudioMessage(InfoBarSeverity.Informational, MinutesTitle,
-            $"「{source.Title}」をPC内のAI（{model.ModelName}）で"
-            + (dictionary is null ? "整理" : "校正（辞書 " + dictionary.Count + " 語から関係する語のみ使用）してから整理")
-            + "しています。1〜数分かかります。原文は変更されません。", cancel);
-        string sourceTitle = source.Title;
-        StartMinutesIndicator(dictionary is not null);
-        var minutesProgress = new Progress<MinutesProgress>(p =>
+        string modelName = probe.ModelName;
+        (probe as IDisposable)?.Dispose(); // nothing was loaded: the job loads the model when its turn comes
+
+        var job = _jobs.Enqueue(new AiJob { Kind = AiJobKind.Minutes, NoteId = source.Id, Engine = modelName });
+        UpdateTestMirrors();
+        if (_jobs.Running is not null || transcriptComing)
         {
+            var cancel = new Button { Content = "中止" };
+            AutomationProperties.SetAutomationId(cancel, "MinutesCancel");
+            cancel.Click += (_, _) => _jobs.Cancel(job.Id);
+            ShowAudioMessage(InfoBarSeverity.Informational, "AI議事録の作成を予約しました",
+                transcriptComing ? "このノートの文字起こしが終わってから作成します。録音はこの間も開始できます。" : "実行中のAI処理が終わってから作成します。", cancel);
+        }
+
+        UpdateMinutesButton();
+    }
+
+    /// <summary>A minutes job is waiting or running (one at a time from the menu).</summary>
+    private bool MinutesBusy => _jobs?.Snapshot().Any(j => j.Kind == AiJobKind.Minutes && j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted) == true;
+
+    /// <summary>A minutes job waiting for its turn says so in the strip (a running one shows its steps).</summary>
+    private void UpdateMinutesButton()
+    {
+        if (_minutesJobId is not null)
+        {
+            return;
+        }
+
+        if (_jobs?.Snapshot().FirstOrDefault(j => j.Kind == AiJobKind.Minutes && j.State is AiJobState.Pending or AiJobState.Interrupted) is { } waiting)
+        {
+            MinutesBar.Visibility = Visibility.Visible;
+            MinutesStateIcon.Visibility = Visibility.Collapsed;
+            MinutesStatusText.Text = waiting.Waiting is { } why ? $"AI議事録 待機中：{why}" : "AI議事録 待機中";
+            MinutesIndicator.Visibility = Visibility.Visible;
+            UpdateControlBarEmphasis();
+        }
+        else if (MinutesStatusText.Text.StartsWith("AI議事録 待機中", StringComparison.Ordinal))
+        {
+            MinutesIndicator.Visibility = Visibility.Collapsed; // cancelled before its turn
+            UpdateControlBarEmphasis();
+        }
+    }
+
+    /// <summary>The note's current text for minutes: the editor's latest for the open note, the file for a closed one.</summary>
+    private async Task<(string Text, string Title)> MinutesInputAsync(string noteId)
+    {
+        // A transcript that arrived during IME conversion is added when it ends: wait for it.
+        for (int i = 0; i < 600 && (_transcriptsWaitingForIme.Count > 0 || IsComposing); i++)
+        {
+            await Task.Delay(100);
+        }
+
+        if (_transcriptsWaitingForIme.Count > 0 || IsComposing)
+        {
+            throw new InvalidOperationException("日本語入力の変換中のため、文字起こしをノートに追加できませんでした。確定してからもう一度作成してください。");
+        }
+
+        if (_workspace!.Tabs.FirstOrDefault(t => t.Id == noteId) is { } tab)
+        {
+            if (ReferenceEquals(tab, _workspace.Active) && !await _editor.FlushAsync())
+            {
+                throw new InvalidOperationException("最新の本文を受け取れなかったため作成していません。少し待ってからもう一度お試しください。");
+            }
+
+            if (tab.IsDirty)
+            {
+                HandleSaveResult(await _workspace.SaveAsync(tab));
+            }
+
+            return (tab.Text, tab.Title);
+        }
+
+        var info = _workspace.Library.Find(noteId) ?? throw new InvalidOperationException("元のノートが見つかりません（削除または移動された可能性があります）。");
+        return (await File.ReadAllTextAsync(info.FilePath), info.Title);
+    }
+
+    private string? _minutesJobId;
+
+    /// <summary>
+    /// A minutes job: reads the note when its turn comes, runs the local LLM and saves the draft
+    /// as a new note. The note itself is never changed; on failure nothing is written.
+    /// </summary>
+    private async Task RunMinutesJobAsync(AiJob job, CancellationToken cancellationToken)
+    {
+        // One model at a time: Whisper (kept between transcriptions) gives its memory back first.
+        _transcriber?.ReleaseModel();
+        if (_services?.CreateMinutesModel() is not { } model)
+        {
+            await OnUiAsync(() => ShowAudioMessage(InfoBarSeverity.Warning, "AIモデルがありません", "議事録を作成できませんでした。原文はそのままです。"));
+            throw new InvalidOperationException("AIモデルがありません");
+        }
+
+        IReadOnlyList<TermEntry>? dictionary = _services.Preferences.CorrectTranscriptBeforeMinutes ? _services.Dictionary.ActiveEntries : null;
+        // This runs on the job's thread: the reports are handed to the UI thread.
+        var minutesProgress = new Progress<MinutesProgress>(p => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_minutesStep is { LoadingModel: true } && !p.LoadingModel)
+            {
+                ReturnFocusToEditorIfLost(); // the LLM has just loaded
+            }
+
             _minutesStep = p;
             UpdateMinutesIndicator();
-        });
+        }));
         try
         {
-            string noteId = source.Id;
+            var (transcript, sourceTitle) = await OnUiAsync(() => MinutesInputAsync(job.NoteId!));
+            if (transcript.Trim().Length < 20)
+            {
+                throw new InvalidOperationException("原文が短すぎます。文字起こしのあるノートで作成してください。");
+            }
+
+            await OnUiAsync(() =>
+            {
+                _minutesJobId = job.Id;
+                var cancel = new Button { Content = "中止" };
+                AutomationProperties.SetAutomationId(cancel, "MinutesCancel");
+                cancel.Click += (_, _) => _jobs?.Cancel(job.Id);
+                // Step 1 (optional): correct misrecognitions with the dictionary and the context.
+                // Step 2: write the minutes from the corrected text. Separate prompts, same local model.
+                ShowAudioMessage(InfoBarSeverity.Informational, MinutesTitle,
+                    $"「{sourceTitle}」をPC内のAI（{model.ModelName}）で"
+                    + (dictionary is null ? "整理" : "校正（辞書 " + dictionary.Count + " 語から関係する語のみ使用）してから整理")
+                    + "しています。1〜数分かかります。原文は変更されません。録音はこの間も開始できます。", cancel);
+                StartMinutesIndicator(dictionary is not null);
+            });
+
             var template = _services.Templates.Find(_services.Preferences.MinutesTemplateId); // null = おまかせ
             var priority = _services.Preferences.MinutesPriority;
             var draft = await Task.Run(() => new MinutesGenerator(model, MinutesStyles.For(model.ModelName), template) { Priority = priority }.GenerateAsync(transcript, sourceTitle, DateTime.Now,
-                minutesProgress, cts.Token, dictionary, noteId));
+                minutesProgress, cancellationToken, dictionary, job.NoteId), cancellationToken);
             draft.Run?.Append(DateTime.Now); // sizes, parts and finish reasons only (%TEMP%, not the note text)
-            var (tab, saved) = await _workspace.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), MinutesPresentation.ForReader(draft.Markdown));
-            HandleSaveResult(saved);
-            if (draft.Correction is { } correction)
+            await OnUiAsync(async () =>
             {
-                // Remember the corrected text as written, to learn from the user's fixes later.
-                CorrectionLearning.SaveSnapshot(_workspace.Library.MetaDirectory, tab.Id, correction.Annotated.Trim());
-
-                // AI fixes of spellings the dictionary did not list yet are offered for approval.
-                foreach (var d in correction.Decisions.Where(d => d.Status == CorrectionStatus.Applied && d.Term is { } t && !t.Misrecognitions.Contains(d.Proposal.From)))
+                var (tab, saved) = await _workspace!.CreateNoteAsync(MinutesNotes.TitleFor(sourceTitle), MinutesPresentation.ForReader(draft.Markdown));
+                HandleSaveResult(saved);
+                if (draft.Correction is { } correction)
                 {
-                    _services.Dictionary.AddCandidate(d.Proposal.From, d.Term!.Term, "AI校正", tab.Title);
+                    // Remember the corrected text as written, to learn from the user's fixes later.
+                    CorrectionLearning.SaveSnapshot(_workspace.Library.MetaDirectory, tab.Id, correction.Annotated.Trim());
+
+                    // AI fixes of spellings the dictionary did not list yet are offered for approval.
+                    foreach (var d in correction.Decisions.Where(d => d.Status == CorrectionStatus.Applied && d.Term is { } t && !t.Misrecognitions.Contains(d.Proposal.From)))
+                    {
+                        _services.Dictionary.AddCandidate(d.Proposal.From, d.Term!.Term, "AI校正", tab.Title);
+                    }
                 }
-            }
-            FinishMinutesIndicator(MinutesOutcome.Done);
-            ShowAudioMessage(InfoBarSeverity.Success, "AI議事録の下書きを作成しました",
-                (draft.Warnings.Count > 0 ? $"要確認の箇所が {draft.Warnings.Count} 件あります（⚠ の付いた項目）。" : string.Empty)
-                + $"「{tab.Title}」として保存しました。原文と照らし合わせて確認してください。",
-                details: string.Join("\n", draft.Warnings));
+
+                FinishMinutesIndicator(MinutesOutcome.Done);
+                ShowAudioMessage(InfoBarSeverity.Success, "AI議事録の下書きを作成しました",
+                    (draft.Warnings.Count > 0 ? $"要確認の箇所が {draft.Warnings.Count} 件あります（⚠ の付いた項目）。" : string.Empty)
+                    + $"「{tab.Title}」として保存しました。原文と照らし合わせて確認してください。",
+                    details: string.Join("\n", draft.Warnings));
+            });
         }
         catch (OperationCanceledException)
         {
-            FinishMinutesIndicator(MinutesOutcome.Cancelled);
-            ShowAudioMessage(InfoBarSeverity.Informational, "AI議事録の作成を中止しました", "原文はそのままです。");
+            await TryOnUiAsync(() =>
+            {
+                FinishMinutesIndicator(MinutesOutcome.Cancelled);
+                ShowAudioMessage(InfoBarSeverity.Informational, "AI議事録の作成を中止しました", "原文はそのままです。");
+            });
+            throw;
         }
         catch (Exception ex)
         {
-            FinishMinutesIndicator(MinutesOutcome.Failed);
             // Model file broken, out of memory, …: the transcript is untouched either way.
-            ShowAudioMessage(InfoBarSeverity.Error, "AI議事録を作成できませんでした", "原文はそのままです。", details: ex.Message);
+            await TryOnUiAsync(() =>
+            {
+                FinishMinutesIndicator(MinutesOutcome.Failed);
+                ShowAudioMessage(InfoBarSeverity.Error, "AI議事録を作成できませんでした", "原文はそのままです。", details: ex.Message);
+            });
+            throw;
         }
         finally
         {
-            _minutesCts = null;
-            cts.Dispose();
-            (model as IDisposable)?.Dispose(); // frees the model's memory (~2–3 GB)
+            (model as IDisposable)?.Dispose(); // frees the model's memory (~2–3 GB) before the next job
+            await TryOnUiAsync(() => _minutesJobId = null);
+        }
+    }
+
+    /// <summary>Like <see cref="OnUiAsync(Action)"/>, but quiet when the window is already closing.</summary>
+    private async Task TryOnUiAsync(Action action)
+    {
+        try
+        {
+            await OnUiAsync(action);
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 
@@ -2188,10 +2344,6 @@ public sealed partial class MainPage : Page
             case VoiceState.Recording:
                 await StopRecordingAsync();
                 break;
-            case VoiceState.Transcribing:
-                // The button doubles as "cancel transcription"; the audio is kept for retry.
-                _transcriptionCts?.Cancel();
-                break;
         }
     }
 
@@ -2246,10 +2398,7 @@ public sealed partial class MainPage : Page
         _recordingSources = sources;
         StartLevelTimer();
 
-        // Audio that was waiting for a retry is not deleted by a new recording: it is kept and
-        // offered again at the next start (recover or delete).
-        _pendingAudio?.Keep();
-        _pendingAudio = null;
+        // Earlier recordings keep their jobs (and failed ones their audio): a new recording never touches them.
         AudioInfoBar.IsOpen = false;
         SetVoiceState(VoiceState.Recording);
         _recordingClock.Start();
@@ -2264,15 +2413,16 @@ public sealed partial class MainPage : Page
 
         _recordingClock.Stop();
         SetVoiceState(VoiceState.Processing);
-        RecordedAudio audio;
+        string? noteId = _recordingNoteId;
+        StoppedRecording stopped;
         try
         {
-            audio = await _recorder.StopAsync();
+            // Only closes the files: the recorder is free for the next recording right after this.
+            stopped = await _recorder.StopCaptureAsync();
         }
         catch (RecordingSaveException ex)
         {
             // Nothing was deleted: the captured audio can be processed again (or deleted) now or after a restart.
-            string? noteId = _recordingNoteId;
             ShowAudioMessage(InfoBarSeverity.Error, "録音の後処理に失敗しました",
                 "録音された音声は一時フォルダに保護しています。「もう一度処理」で文字起こしできます（次回の起動時にも確認します）。",
                 CreateRecoverButton(ex.SessionDirectory, noteId), details: ex.Message);
@@ -2286,107 +2436,299 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        if (!audio.HasAudio)
+        SetVoiceState(VoiceState.Idle);
+        if (!stopped.HasAudio)
         {
-            audio.Delete();
+            stopped.Delete();
             ShowAudioMessage(InfoBarSeverity.Warning, "音声が録音されませんでした",
                 "PC音声は、何かが再生されている間だけ録音されます。");
-            SetVoiceState(VoiceState.Idle);
             return;
         }
 
-        await TranscribeAsync(audio);
+        // Converting and transcribing are the job's: it runs in the background, in turn.
+        _stopped[stopped.SessionDirectory] = stopped;
+        QueueTranscription(stopped.SessionDirectory, noteId);
     }
 
-    /// <summary>
-    /// Runs local Whisper on the recording and inserts the text into the note it was recorded
-    /// for. On failure or cancel no note is touched and the audio is kept for a retry.
-    /// </summary>
-    private async Task TranscribeAsync(RecordedAudio audio)
+    private void QueueTranscription(string sessionDirectory, string? noteId)
     {
-        if (_transcriber is null)
+        _jobs?.Enqueue(new AiJob
         {
-            return;
+            Kind = AiJobKind.Transcribe,
+            SessionDirectory = sessionDirectory,
+            NoteId = noteId ?? _workspace?.Active?.Id,
+            Engine = SpeechEngineName,
+        });
+        UpdateRecordingText(); // shown at once (the queue's own notice arrives a moment later)
+        UpdateTestMirrors();
+    }
+
+    /// <summary>The speech recognizer new transcriptions use.</summary>
+    private string SpeechEngineName => _services?.Preferences.SpeechRecognizer is SpeechCppTranscriptionService.Id ? SpeechCppTranscriptionService.Id : "whisper";
+
+    /// <summary>The recognizer a job was queued with (Haas-ja only when it is installed; the job fails otherwise).</summary>
+    private ISpeechRecognizer? RecognizerFor(AiJob job) =>
+        job.Engine == SpeechCppTranscriptionService.Id ? _services?.Haas : _transcriber;
+
+    // ----- AI jobs (speech recognition, minutes) ---------------------------------------
+
+    /// <summary>Free memory a job needs before it starts: its model file and working memory.</summary>
+    private long RequiredMegabytes(AiJob job)
+    {
+        static long SizeOf(string? path) => path is not null && File.Exists(path) ? new FileInfo(path).Length / 1_048_576 : 0;
+        return job.Kind switch
+        {
+            // Whisper keeps the model and a few hundred MB of buffers.
+            // Haas-ja: its process holds the model and, on the CPU, the pieces' activations.
+            AiJobKind.Transcribe when job.Engine == SpeechCppTranscriptionService.Id => (SizeOf(_services?.Haas?.ModelPath) * 2) + 300,
+            AiJobKind.Transcribe => (SizeOf(_transcriber?.ModelPath) * 2) + 300,
+            // The LLM's weights plus its context (about 1 GB for the minutes' prompts).
+            _ => (long)(SizeOf(LlamaTextGenerator.FindModel(_services?.Preferences.MinutesModel)) * 1.2) + 1024,
+        };
+    }
+
+    private Task RunJobAsync(AiJob job, IProgress<double> progress, CancellationToken cancellationToken) => job.Kind switch
+    {
+        AiJobKind.Transcribe => RunTranscriptionJobAsync(job, progress, cancellationToken),
+        _ => RunMinutesJobAsync(job, cancellationToken),
+    };
+
+    /// <summary>Runs <paramref name="action"/> on the UI thread and waits for it (jobs run on a worker thread).</summary>
+    private Task<T> OnUiAsync<T>(Func<Task<T>> action)
+    {
+        var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (_closing)
+        {
+            // The UI thread is waiting for the jobs to stop: nothing more is shown.
+            done.SetException(new OperationCanceledException("The window is closing."));
+            return done.Task;
         }
 
-        SetPendingAudio(audio);
-        AudioInfoBar.IsOpen = false;
-        using var cts = new CancellationTokenSource();
-        _transcriptionCts = cts;
-        _transcribeFraction = null;
-        SetVoiceState(VoiceState.Transcribing);
-        _recordingClock.Start(); // refreshes "preparing model" -> "transcribing"
+        if (!DispatcherQueue.TryEnqueue(async () =>
+        {
+            try
+            {
+                done.SetResult(await action());
+            }
+            catch (Exception ex)
+            {
+                done.SetException(ex);
+            }
+        }))
+        {
+            done.SetException(new OperationCanceledException("The window is closing."));
+        }
+
+        return done.Task;
+    }
+
+    private Task OnUiAsync(Action action) => OnUiAsync(() =>
+    {
+        action();
+        return Task.FromResult(true);
+    });
+
+    private Task OnUiAsync(Func<Task> action) => OnUiAsync(async () =>
+    {
+        await action();
+        return true;
+    });
+
+    /// <summary>
+    /// A transcription job: makes the transcription WAV, runs the speech recognizer and puts the
+    /// text into the note the recording was made for. On failure or cancel no note is touched and
+    /// the audio is kept for a retry; on success the audio is deleted (temporary by design).
+    /// </summary>
+    private async Task RunTranscriptionJobAsync(AiJob job, IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        string session = job.SessionDirectory!;
         string outcome = "文字起こし 失敗";
         try
         {
-            // Reports arrive on Whisper's thread; Progress<T> hands them to the UI thread.
-            var progress = new Progress<double>(fraction =>
+            var recognizer = RecognizerFor(job);
+            if (recognizer is null)
             {
-                _transcribeFraction = fraction;
-                UpdateRecordingText();
-            });
-            TranscriptionResult result;
-            await using (var stream = File.OpenRead(audio.FilePath!))
-            {
-                // Finished windows are saved next to the audio: a retry continues where this one stopped.
-                result = await _transcriber.TranscribeAsync(stream, cts.Token, progress,
-                    System.IO.Path.Combine(audio.SessionDirectory, TranscriptionCheckpoint.FileName));
+                throw new TranscriptionException(job.Engine == SpeechCppTranscriptionService.Id
+                    ? $"Haas-ja のファイルが見つかりません。README の手順で models\\{ModelLocations.HaasFolder} に置くか、設定で Whisper に戻してください。"
+                    : "音声認識を開始できませんでした。")
+                { IsModelMissing = true };
             }
 
-            // Numbers only (durations, segment counts, repeats) for diagnosing real recordings.
-            if (_transcriber.LastDiagnostics is { } diagnostics)
+            if (RecordingManifest.Load(session)?.State == RecordingStates.Delivered)
             {
-                TranscriptionLog.Append(TranscriptionLog.Format(DateTime.Now, audio.CapturedSources, diagnostics, result,
-                    System.IO.Path.GetFileName(_transcriber.ModelPath)));
+                // Delivered before the app ended: only the deletion was left.
+                AudioRecorder.DeleteSession(session);
+                outcome = "文字起こし 完了";
+                return;
+            }
+
+            RecordedAudio audio;
+            try
+            {
+                audio = _stopped.TryRemove(session, out var stopped)
+                    ? await AudioRecorder.PrepareAsync(stopped)
+                    : await AudioRecorder.RecoverAsync(session); // a later run, or a retry after a failed conversion
+            }
+            catch (Exception ex) when (ex is RecordingSaveException or InvalidDataException or IOException)
+            {
+                throw new TranscriptionException($"録音の後処理に失敗しました。録音された音声は一時フォルダに保護しています。（{ex.Message}）", ex);
+            }
+
+            if (!audio.HasAudio)
+            {
+                audio.Delete();
+                outcome = "文字起こし 完了";
+                await OnUiAsync(() => ShowAudioMessage(InfoBarSeverity.Warning, "音声が録音されませんでした", "PC音声は、何かが再生されている間だけ録音されます。"));
+                return;
+            }
+
+            // The audio is converted first and kept either way. Whisper names its missing model
+            // itself (with the path); Haas-ja's files are checked here.
+            if (!ReferenceEquals(recognizer, _transcriber))
+            {
+                if (recognizer.MissingFiles() is { } missingFiles)
+                {
+                    throw new TranscriptionException(missingFiles) { IsModelMissing = true };
+                }
+
+                _transcriber?.ReleaseModel(); // one model at a time
+            }
+
+            // Finished parts are saved next to the audio: a retry continues where this one stopped.
+            var result = await recognizer.TranscribeFileAsync(audio.FilePath!, cancellationToken, progress,
+                System.IO.Path.Combine(session, recognizer.Name == "whisper" ? TranscriptionCheckpoint.FileName : $"{recognizer.Name}-checkpoint.json"));
+
+            // Numbers only (durations, segment counts, repeats) for diagnosing real recordings.
+            if (recognizer.LastDiagnostics is { } diagnostics)
+            {
+                TranscriptionLog.Append(TranscriptionLog.Format(DateTime.Now, audio.CapturedSources, diagnostics, result, recognizer.DisplayName));
             }
 
             if (result.IsEmpty)
             {
-                DeletePendingAudio();
-                ShowAudioMessage(InfoBarSeverity.Warning, "音声を認識できませんでした", "話し声が含まれていない可能性があります。");
+                audio.Delete();
+                outcome = "文字起こし 完了";
+                await OnUiAsync(() => ShowAudioMessage(InfoBarSeverity.Warning, "音声を認識できませんでした", "話し声が含まれていない可能性があります。"));
                 return;
             }
 
-            await DeliverTranscriptAsync(result.Text);
-            outcome = "文字起こし 完了";
+            // Not while the app is closing (the exit holds this): the transcript would be put
+            // into the editor after the last save and lost with the deleted audio.
+            await _deliveryGate.WaitAsync(cancellationToken);
+            try
+            {
+                string target = job.NoteId ?? await OnUiAsync(() => Task.FromResult(_workspace?.Active?.Id ?? string.Empty));
+                await OnUiAsync(() => DeliverTranscriptToAsync(target, result.Text));
+                outcome = "文字起こし 完了";
 
-            // Success: raw audio is temporary by design and is deleted right away.
-            DeletePendingAudio();
+                // The audio goes only once the note with the transcript is on disk. A recording
+                // whose transcript is delivered is marked so, so a run after a crash never adds it twice.
+                if (await OnUiAsync(() => TranscriptIsSavedAsync(target, result.Text)))
+                {
+                    RecordingManifest.MarkDelivered(session);
+                    audio.Delete();
+                }
+            }
+            finally
+            {
+                _deliveryGate.Release();
+            }
         }
         catch (OperationCanceledException)
         {
             outcome = "文字起こし 中止";
-            ShowAudioMessage(InfoBarSeverity.Informational, "文字起こしを中止しました",
-                "音声は再試行用に一時保持しています。", CreateRetryButton());
+            await OnUiAsync(() => ShowAudioMessage(InfoBarSeverity.Informational, "文字起こしを中止しました",
+                "音声は再試行用に一時保持しています。", CreateRetryButton(job.Id)));
+            throw;
         }
         catch (Exception ex)
         {
             // Includes TranscriptionException (e.g. model missing). The memo text is never touched.
-            string message = ex is TranscriptionException { IsModelMissing: true }
+            string message = ex is TranscriptionException { IsModelMissing: true } && job.Engine != SpeechCppTranscriptionService.Id
                 ? $"Whisperモデル（{LocalWhisperTranscriptionService.KnownModels[0]}）がありません。README の手順でダウンロードして {System.IO.Path.GetDirectoryName(LocalWhisperTranscriptionService.DefaultModelPath)} に置いてください。"
                 : ex.Message;
-            ShowAudioMessage(InfoBarSeverity.Error, "文字起こしできませんでした", message, CreateRetryButton(),
-                details: $"{ex.Message}\n\n音声は再試行用に一時保持しています（次の録音・終了時に削除）。");
+            await OnUiAsync(() => ShowAudioMessage(InfoBarSeverity.Error, "文字起こしできませんでした", message, CreateRetryButton(job.Id),
+                details: $"{ex.Message}\n\n音声は再試行用に一時保持しています（次回の起動時にも確認します）。"));
+            throw new TranscriptionException(message, ex);
         }
         finally
         {
-            _recordingClock.Stop();
-            _transcriptionCts = null;
-            _transcribeFraction = null;
-            SetVoiceState(VoiceState.Idle);
-            ShowStatus(outcome); // finished / failed / cancelled, briefly (details in the message bar)
+            string shown = outcome;
+            try
+            {
+                await OnUiAsync(() =>
+                {
+                    ShowStatus(shown); // finished / failed / cancelled, briefly (details in the message bar)
+                    ReturnFocusToEditorIfLost();
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                // The window is closing.
+            }
         }
     }
 
-    // Share of the speech Whisper has processed (null = not known yet, e.g. while loading the model).
-    private double? _transcribeFraction;
+    // Held while the app closes (see HoldDeliveries): no transcript is put into a note then.
+    private readonly SemaphoreSlim _deliveryGate = new(1, 1);
+    private volatile bool _closing;
 
-    /// <summary>Puts the transcript into the note the recording belongs to.</summary>
-    private async Task DeliverTranscriptAsync(string transcript)
+    /// <summary>
+    /// Exiting: waits for a transcript being delivered, then keeps the next ones back until
+    /// <see cref="ReleaseDeliveries"/> (the user stays) or the jobs are stopped (the user exits).
+    /// </summary>
+    public Task HoldDeliveriesAsync() => _deliveryGate.WaitAsync();
+
+    public void ReleaseDeliveries() => _deliveryGate.Release();
+
+    /// <summary>Saves the note the transcript went to and checks that the saved text holds it.</summary>
+    private async Task<bool> TranscriptIsSavedAsync(string noteId, string transcript)
     {
-        if ((_recordingNoteId ?? _workspace?.Active?.Id) is { } target)
+        // A transcript that arrived during IME conversion goes in when it ends; wait a while for it.
+        string probe = transcript.Trim()[..Math.Min(40, transcript.Trim().Length)];
+        for (int i = 0; i < 120; i++)
         {
-            await DeliverTranscriptToAsync(target, transcript);
+            await FlushAsync();
+            var tab = _workspace?.Tabs.FirstOrDefault(t => t.Id == noteId);
+            string? saved = tab is not null
+                ? (tab.IsDirty ? null : tab.Text)
+                : _workspace?.Library.Find(noteId) is { } info && File.Exists(info.FilePath) ? await File.ReadAllTextAsync(info.FilePath) : null;
+            if (saved?.Contains(probe, StringComparison.Ordinal) == true)
+            {
+                return true;
+            }
+
+            // Saved as a new note (the recorded one was gone): that note holds it.
+            if (tab is null && _workspace?.Tabs.Any(t => !t.IsDirty && t.Text.Contains(probe, StringComparison.Ordinal)) == true)
+            {
+                return true;
+            }
+
+            await Task.Delay(500);
+        }
+
+        return false; // kept: the recording stays and is offered again rather than lost
+    }
+
+    /// <summary>The queue changed (a job started, progressed, finished or waits): the status follows.</summary>
+    private void OnJobsChanged()
+    {
+        UpdateRecordingText();
+        UpdateTestMirrors();
+        UpdateMinutesButton();
+    }
+
+    /// <summary>The transcription job that is running, if any.</summary>
+    private AiJob? RunningTranscription => _jobs?.Running is { Kind: AiJobKind.Transcribe } job ? job : null;
+
+    /// <summary>True while a transcription is waiting or running (the window title and exit use it).</summary>
+    public bool IsTranscribing => _jobs?.Snapshot().Any(j => j.Kind == AiJobKind.Transcribe && j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted) == true;
+
+    private void OnCancelTranscriptionClick(object sender, RoutedEventArgs e)
+    {
+        if (RunningTranscription is { } job)
+        {
+            _jobs!.Cancel(job.Id);
         }
     }
 
@@ -2440,37 +2782,6 @@ public sealed partial class MainPage : Page
         return button;
     }
 
-    private Button CreateRetryButton()
-    {
-        var button = new Button { Content = "再試行" };
-        AutomationProperties.SetName(button, "文字起こしを再試行");
-        button.Click += async (_, _) =>
-        {
-            if (_pendingAudio is { } audio && VoiceState == VoiceState.Idle)
-            {
-                await TranscribeAsync(audio);
-            }
-        };
-        return button;
-    }
-
-    private void SetPendingAudio(RecordedAudio? audio)
-    {
-        if (_pendingAudio is not null && !ReferenceEquals(_pendingAudio, audio))
-        {
-            _pendingAudio.Keep(); // never deleted just because another recording came along
-        }
-
-        _pendingAudio = audio;
-    }
-
-    /// <summary>The transcript is in the note (or there was no speech): the audio is not needed any more.</summary>
-    private void DeletePendingAudio()
-    {
-        _pendingAudio?.Delete();
-        _pendingAudio = null;
-    }
-
     // ----- Recordings left from an earlier run (crash, failed processing, kept for a retry) -----
 
     /// <summary>
@@ -2484,7 +2795,10 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var leftovers = _recorder.FindLeftovers().Where(l => _pendingAudio is null || l.Directory != _pendingAudio.SessionDirectory).ToList();
+        // Recordings whose job is waiting or running are not "left over": they are being transcribed.
+        var busy = _jobs?.Snapshot().Where(j => j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted)
+            .Select(j => j.SessionDirectory).ToList() ?? [];
+        var leftovers = _recorder.FindLeftovers().Where(l => !busy.Any(d => SameDirectory(d, l.Directory))).ToList();
         if (leftovers.Count == 0)
         {
             return;
@@ -2532,6 +2846,11 @@ public sealed partial class MainPage : Page
         }
 
         int removed = _recorder.DeleteLeftovers(leftovers);
+        foreach (var leftover in leftovers.Where(l => !Directory.Exists(l.Directory)))
+        {
+            RemoveFinishedJobsOf(leftover.Directory); // their failed jobs have nothing left to retry
+        }
+
         ShowAudioMessage(removed == leftovers.Count ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
             removed == leftovers.Count ? "録音を削除しました" : "一部の録音を削除できませんでした",
             removed == leftovers.Count ? string.Empty : "ファイルが使用中の可能性があります。あとでもう一度お試しください。");
@@ -2551,27 +2870,11 @@ public sealed partial class MainPage : Page
     /// </summary>
     private async Task RecoverAndTranscribeAsync(string sessionDirectory, string? noteId)
     {
-        if (VoiceState != VoiceState.Idle || _workspace is null)
+        if (_workspace is null)
         {
             return;
         }
 
-        SetVoiceState(VoiceState.Processing);
-        ShowAudioMessage(InfoBarSeverity.Informational, "録音を処理しています", "長い録音では数分かかることがあります。");
-        RecordedAudio audio;
-        try
-        {
-            audio = await AudioRecorder.RecoverAsync(sessionDirectory);
-        }
-        catch (Exception ex)
-        {
-            SetVoiceState(VoiceState.Idle);
-            ShowAudioMessage(InfoBarSeverity.Error, "録音を処理できませんでした",
-                "音声は削除していません。もう一度試すか、不要なら次回の起動時に削除できます。", details: ex.Message);
-            return;
-        }
-
-        SetVoiceState(VoiceState.Idle);
         if (noteId is null || _workspace.Library.Find(noteId) is null)
         {
             var (tab, _) = await _workspace.CreateNoteAsync($"録音の復元 {DateTime.Now:yyyy-MM-dd HHmm}", string.Empty);
@@ -2579,8 +2882,39 @@ public sealed partial class MainPage : Page
             RenderTabs();
         }
 
-        _recordingNoteId = noteId;
-        await TranscribeAsync(audio);
+        // A failed job of this recording is replaced by the new one; the job recovers the audio
+        // from its files (the recorder stays free meanwhile).
+        RemoveFinishedJobsOf(sessionDirectory);
+        ShowAudioMessage(InfoBarSeverity.Informational, "録音を処理しています", "長い録音では数分かかることがあります。録音はこの間も開始できます。");
+        QueueTranscription(sessionDirectory, noteId);
+    }
+
+    private void RemoveFinishedJobsOf(string sessionDirectory)
+    {
+        foreach (var job in _jobs?.Snapshot().Where(j => SameDirectory(j.SessionDirectory, sessionDirectory)) ?? [])
+        {
+            _jobs!.Remove(job.Id);
+        }
+    }
+
+    private static bool SameDirectory(string? a, string? b) =>
+        a is not null && b is not null && string.Equals(System.IO.Path.GetFullPath(a).TrimEnd('\\'), System.IO.Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+
+    private Button CreateRetryButton(string jobId)
+    {
+        var button = new Button { Content = "再試行" };
+        AutomationProperties.SetName(button, "文字起こしを再試行");
+        button.Click += async (_, _) =>
+        {
+            // The job is marked failed just after its message appears: wait for that moment.
+            for (int i = 0; i < 30 && _jobs?.Retry(jobId) == false; i++)
+            {
+                await Task.Delay(100);
+            }
+
+            AudioInfoBar.IsOpen = false;
+        };
+        return button;
     }
 
     // A transcript that arrived while the IME was composing. When composition ends it is
@@ -2669,36 +3003,29 @@ public sealed partial class MainPage : Page
         MicToggle.IsEnabled = idle;
         MicDeviceButton.IsEnabled = idle; // the device cannot change under a running recording
         SystemAudioToggle.IsEnabled = idle;
-        RecordButton.IsEnabled = state != VoiceState.Processing;
-        if (idle && FocusManager.GetFocusedElement(XamlRoot) is Control focused && focused != MemoTextBox)
+        RecordButton.IsEnabled = state != VoiceState.Processing; // the files are closing (at most a few seconds)
+        if (idle)
         {
-            // Return to typing once recording/transcription is over.
-            FocusEditor();
+            // Return to typing once recording has stopped (after the status controls changed).
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ReturnFocusToEditorIfLost);
         }
 
         string label = state switch
         {
             VoiceState.Recording => "録音停止",
             VoiceState.Processing => "音声を処理中", // disabled; must not read as "start recording"
-            VoiceState.Transcribing => "文字起こしを中止",
             _ => "録音開始",
         };
         AutomationProperties.SetName(RecordButton, label);
         HoverToolTips.Set(RecordButton, $"{label} (Ctrl+R)");
         RecordIcon.Glyph = state switch
         {
-            VoiceState.Recording => "",    // Stop
-            VoiceState.Transcribing => "", // Cancel
-            _ => "",                       // Record
+            VoiceState.Recording => "", // Stop
+            _ => "",                    // Record
         };
 
-        // Recording: pulsing red dot. Processing/transcribing: a small spinner instead.
+        // Recording: pulsing red dot (transcriptions show their own bar or spinner next to it).
         bool recording = state == VoiceState.Recording;
-        bool busy = state is VoiceState.Processing or VoiceState.Transcribing;
-        RecordingIndicator.Visibility = idle ? Visibility.Collapsed : Visibility.Visible;
-        RecordingDot.Visibility = recording ? Visibility.Visible : Visibility.Collapsed;
-        BusyRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        BusyRing.IsActive = busy;
         var pulse = (Storyboard)Resources["RecordingPulse"];
         // Windows "Animation effects" off: a steady red dot (a looping pulse is exactly the kind
         // of motion that setting asks to avoid). The "録音中" text says the same either way.
@@ -2715,6 +3042,35 @@ public sealed partial class MainPage : Page
         UpdateRecordingText();
         RenderTabs(); // shows/hides the recording mark on the target tab
         VoiceStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Gives the keyboard back to the editor when it is on a button of the strip or nowhere
+    /// (stopping a recording, a transcription finishing). Never taken from a text field the
+    /// user is typing in, or while the memo is in the background.
+    /// </summary>
+    private void ReturnFocusToEditorIfLost()
+    {
+        if (XamlRoot is null || TabStrip.Opacity < 1.0)
+        {
+            return; // the window is in the background (SetWindowActive dims the tab strip)
+        }
+
+        var focused = FocusManager.GetFocusedElement(XamlRoot);
+        if (focused is null || focused == EditorWebView
+            || (focused is Control control && control != MemoTextBox && control is not TextBox and not PasswordBox and not ComboBox and not AutoSuggestBox))
+        {
+            if (ReferenceEquals(_editor, _markdownEditor) && _markdownEditor!.IsFocusStale)
+            {
+                // Loading a native model can move Windows' keyboard focus off the browser while
+                // XAML still counts the WebView as focused; focusing it again then does nothing.
+                // Re-activating the window (it is in front already) gives the browser the keys back.
+                RefocusRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            FocusEditor();
+        }
     }
 
     /// <summary>The control bar stays in the background while typing.</summary>
@@ -3030,35 +3386,68 @@ public sealed partial class MainPage : Page
         }
     }
 
+    // Whether the running transcription has reported a percentage yet (its model is loaded).
+    private bool _transcriptionMeasured;
+
     private void UpdateRecordingText()
     {
-        if (VoiceState == VoiceState.Idle && _statusClear.IsRunning)
+        // Transcriptions waiting or running (a recording can go on at the same time).
+        var transcriptions = _jobs?.Snapshot().Where(j => j.Kind == AiJobKind.Transcribe && j.State is AiJobState.Pending or AiJobState.Running or AiJobState.Interrupted).ToList() ?? [];
+        var running = transcriptions.FirstOrDefault(j => j.State == AiJobState.Running);
+        bool jobs = transcriptions.Count > 0;
+        if (VoiceState == VoiceState.Idle && !jobs && _statusClear.IsRunning)
         {
             return; // A short status message is showing.
         }
 
-        RecordingIndicator.Visibility = VoiceState == VoiceState.Idle ? Visibility.Collapsed : Visibility.Visible;
-        string target = _recordingNoteId is { } id && _workspace?.Library.Find(id) is { } note && note.Id != _workspace.Active?.Id
+        RecordingIndicator.Visibility = VoiceState == VoiceState.Idle && !jobs ? Visibility.Collapsed : Visibility.Visible;
+        string TitleOf(string? noteId) => noteId is { } id && _workspace?.Library.Find(id) is { } note && note.Id != _workspace.Active?.Id
             ? $"（{note.Title}）"
             : string.Empty;
-        RecordingStatusText.Text = VoiceState switch
+
+        string recording = VoiceState switch
         {
-            VoiceState.Recording => $"録音中 {FormatDuration(_recorder?.Elapsed ?? TimeSpan.Zero)}{target}",
+            VoiceState.Recording => $"録音中 {FormatDuration(_recorder?.Elapsed ?? TimeSpan.Zero)}{TitleOf(_recordingNoteId)}",
             VoiceState.Processing => "音声を処理中…",
-            // First use loads the model from disk, which takes a moment.
-            VoiceState.Transcribing when _transcriber?.IsModelLoaded == false || _transcribeFraction is null => "音声モデルを準備中…",
-            VoiceState.Transcribing => $"文字起こし {(int)(_transcribeFraction!.Value * 100)}%{target}",
             _ => string.Empty,
         };
 
-        // A real percentage gets a bar; a step without one (loading) keeps the spinner.
-        bool measured = VoiceState == VoiceState.Transcribing && _transcribeFraction is not null && _transcriber?.IsModelLoaded != false;
-        TranscribeBar.Visibility = measured ? Visibility.Visible : Visibility.Collapsed;
-        TranscribeBar.Value = measured ? _transcribeFraction!.Value * 100 : 0;
-        if (VoiceState is VoiceState.Processing or VoiceState.Transcribing)
+        double? fraction = running is not null ? _jobs!.Progress : null;
+        int waiting = transcriptions.Count - (running is null ? 0 : 1);
+        string more = waiting > 0 ? $"（ほか{waiting}件待ち）" : string.Empty;
+        string transcription = running switch
         {
-            BusyRing.Visibility = measured ? Visibility.Collapsed : Visibility.Visible;
-            BusyRing.IsActive = !measured;
+            null when jobs => transcriptions[0].Waiting is { } why ? $"文字起こし待ち：{why}" : $"文字起こし待ち {transcriptions.Count}件",
+            null => string.Empty,
+            // Converting the recording, then loading the model from disk: no percentage yet.
+            _ when fraction is null => $"音声モデルを準備中…{more}",
+            _ => $"文字起こし {(int)(fraction.Value * 100)}%{TitleOf(running.NoteId)}{more}",
+        };
+        RecordingStatusText.Text = recording.Length > 0 && transcription.Length > 0 ? $"{recording}・{transcription}" : recording + transcription;
+
+        // A real percentage gets a bar; a step without one (converting, loading) the spinner.
+        bool measured = fraction is not null;
+        if (measured && !_transcriptionMeasured)
+        {
+            // The model has just loaded (which can take the keyboard from the editor).
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ReturnFocusToEditorIfLost);
+        }
+
+        _transcriptionMeasured = measured;
+        TranscribeBar.Visibility = measured ? Visibility.Visible : Visibility.Collapsed;
+        TranscribeBar.Value = measured ? fraction!.Value * 100 : 0;
+        bool spinning = VoiceState == VoiceState.Processing || (jobs && !measured);
+        BusyRing.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
+        BusyRing.IsActive = spinning;
+        RecordingDot.Visibility = VoiceState == VoiceState.Recording ? Visibility.Visible : Visibility.Collapsed;
+        CancelTranscriptionButton.Visibility = running is not null ? Visibility.Visible : Visibility.Collapsed;
+        if (jobs && !_recordingClock.IsRunning)
+        {
+            _recordingClock.Start(); // keeps the text current (elapsed time, waiting reason)
+        }
+        else if (!jobs && VoiceState != VoiceState.Recording)
+        {
+            _recordingClock.Stop();
         }
     }
 

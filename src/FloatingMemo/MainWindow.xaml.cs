@@ -1,4 +1,4 @@
-using FloatingMemo.Interop;
+﻿using FloatingMemo.Interop;
 using FloatingMemo.Services;
 using FloatingMemo.Services.Settings;
 using Microsoft.UI;
@@ -73,6 +73,13 @@ public sealed partial class MainWindow : Window
             if (active)
             {
                 MemoPage?.FocusEditor();
+                // Re-activated with the WebView still focused in XAML (e.g. after a native model
+                // load took the foreground for a moment): XAML does not move Windows' focus back
+                // into the browser by itself, so it is given there directly.
+                if (MemoPage?.EditorWebViewHasXamlFocus == true && FindBrowserWindow() is { } browser)
+                {
+                    NativeMethods.SetFocus(browser);
+                }
             }
         };
 
@@ -104,6 +111,21 @@ public sealed partial class MainWindow : Window
             };
             page.VoiceStateChanged += (_, _) => UpdateTitle();
             page.HideRequested += (_, _) => { if (!CloseOpenMenus()) { HideMemo(); } }; // Esc inside the Markdown editor
+            page.RefocusRequested += (_, _) =>
+            {
+                // Only while the memo is in front: never pulls it over another app.
+                if (AppWindow.IsVisible && NativeMethods.GetForegroundWindow() == _hwnd)
+                {
+                    // Windows' keyboard focus goes straight to the browser's own window (made on
+                    // this thread by the WebView); the page then puts the caret back by itself.
+                    if (FindBrowserWindow() is { } browser && browser != IntPtr.Zero)
+                    {
+                        NativeMethods.SetFocus(browser);
+                    }
+
+                    page.FocusEditor();
+                }
+            };
             page.ActiveNoteChanged += (_, _) => UpdateTitle();
             UpdateTitle();
         }
@@ -124,6 +146,27 @@ public sealed partial class MainWindow : Window
         // the glass rim drawn by the page does the rest. COLORREF is 0x00BBGGRR.
         uint border = light ? 0x00E3DDD8u : 0x00575049u; // light: #D8DDE3, dark: #495057
         NativeMethods.DwmSetWindowAttribute(_hwnd, NativeMethods.DWMWA_BORDER_COLOR, ref border, sizeof(uint));
+    }
+
+    /// <summary>The WebView's browser host window (a child of this window, on the UI thread), if any.</summary>
+    private IntPtr? FindBrowserWindow()
+    {
+        IntPtr found = IntPtr.Zero;
+        uint thread = NativeMethods.GetCurrentThreadId();
+        var name = new System.Text.StringBuilder(64);
+        NativeMethods.EnumChildWindows(_hwnd, (child, _) =>
+        {
+            name.Clear();
+            NativeMethods.GetClassName(child, name, name.Capacity);
+            if (name.ToString() == "Chrome_WidgetWin_0" && NativeMethods.GetWindowThreadProcessId(child, out uint _) == thread)
+            {
+                found = child;
+                return false;
+            }
+
+            return true;
+        }, IntPtr.Zero);
+        return found == IntPtr.Zero ? null : found;
     }
 
     private MainPage? MemoPage => RootFrame.Content as MainPage;
@@ -317,9 +360,13 @@ public sealed partial class MainWindow : Window
         {
             if (MemoPage is { } page)
             {
+                // No transcript goes into a note from here on (it would miss the last save): a
+                // job that is about to deliver one waits, and runs again at the next start.
+                await page.HoldDeliveriesAsync();
                 await page.FlushEditorAsync();
                 if (!ConfirmAndPrepareExit(page))
                 {
+                    page.ReleaseDeliveries();
                     return; // the user chose to stay
                 }
             }
@@ -338,13 +385,25 @@ public sealed partial class MainWindow : Window
     {
         if (page.VoiceState != VoiceState.Idle)
         {
-            string activity = page.VoiceState == VoiceState.Recording ? "録音中" : "文字起こし中";
             int discard = NativeMethods.MessageBox(
                 _hwnd,
-                $"{activity}です。録音した音声を破棄して終了しますか？\n（［いいえ］でメモに戻ります）",
+                "録音中です。録音した音声を破棄して終了しますか？\n（［いいえ］でメモに戻ります）",
                 "Floating Memo",
                 NativeMethods.MB_YESNO | NativeMethods.MB_ICONWARNING | NativeMethods.MB_DEFBUTTON2);
             if (discard != NativeMethods.IDYES)
+            {
+                return false;
+            }
+        }
+        else if (page.UnfinishedJobs > 0)
+        {
+            // Nothing is lost: the recordings and the queue are kept and continue at the next start.
+            int leave = NativeMethods.MessageBox(
+                _hwnd,
+                $"文字起こし・AI議事録の処理が {page.UnfinishedJobs} 件残っています。\n終了しても録音は残り、次回の起動時に続きから処理します。終了しますか？\n（［いいえ］でメモに戻ります）",
+                "Floating Memo",
+                NativeMethods.MB_YESNO | NativeMethods.MB_ICONINFORMATION | NativeMethods.MB_DEFBUTTON2);
+            if (leave != NativeMethods.IDYES)
             {
                 return false;
             }
@@ -364,8 +423,8 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        // Really exiting: remember where the window was, stop capture/transcription and
-        // delete temporary audio (including audio kept for a retry).
+        // Really exiting: remember where the window was, discard a recording in progress and stop
+        // the AI jobs (stopped recordings and their jobs are kept for the next start).
         SavePlacement();
         page.DiscardRecording();
         return true;

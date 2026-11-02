@@ -29,6 +29,7 @@ internal static class NativeMethods
     public const uint MB_YESNO = 0x0004;
     public const uint MB_ICONERROR = 0x0010;
     public const uint MB_ICONWARNING = 0x0030;
+    public const uint MB_ICONINFORMATION = 0x0040;
     public const uint MB_DEFBUTTON2 = 0x0100;
     public const int IDYES = 6;
 
@@ -91,4 +92,25 @@ internal static class NativeMethods
 
     [DllImport("comctl32.dll")]
     public static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder className, int maxCount);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetFocus();
 }

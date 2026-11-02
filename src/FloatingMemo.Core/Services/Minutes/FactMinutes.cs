@@ -1371,19 +1371,30 @@ public static partial class FactMinutes
 /// <summary>Kanji numerals → digits (十一月二十日 → 11月20日), so both spellings compare equal.</summary>
 public static partial class Numerals
 {
-    [GeneratedRegex("[〇零一二三四五六七八九十百千万]+")]
+    // A number written with kanji, or with digits and kanji units together ("3万2千", "30万").
+    [GeneratedRegex("[0-9〇零一二三四五六七八九十百千万]*[〇零一二三四五六七八九十百千万][0-9〇零一二三四五六七八九十百千万]*")]
     private static partial Regex Kanji();
 
+    /// <summary>
+    /// Kanji numerals as digits, for comparing numbers: "三十万円" and "30万円" both become
+    /// "300000円" ("30万" used to become "300": its 万 alone was read as 0). A 万 or 千 with no
+    /// number before it ("万全", "千葉") is left as it is.
+    /// </summary>
     public static string Arabic(string text) => Kanji().Replace(text, m => Value(m.Value)?.ToString() ?? m.Value);
 
     private static long? Value(string kanji)
     {
         const string digits = "〇一二三四五六七八九";
+        if (kanji is "万" or "千" or "百")
+        {
+            return null; // a unit alone is part of a word ("万全", "千葉", "百貨店"), not a number
+        }
+
         long total = 0, section = 0, number = 0;
         bool any = false;
         foreach (char c in kanji)
         {
-            int d = digits.IndexOf(c);
+            int d = c is >= '0' and <= '9' ? c - '0' : digits.IndexOf(c);
             if (c == '零')
             {
                 d = 0;

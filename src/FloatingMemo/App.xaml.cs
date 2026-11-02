@@ -32,6 +32,9 @@ public partial class App : Application
         InitializeComponent();
 
         UnhandledException += (_, e) => WriteCrashLog(e.Exception);
+        // Background threads (AI jobs, audio): their failures end the process without the event above.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => { if (e.ExceptionObject is Exception ex) { WriteCrashLog(ex); } };
+        TaskScheduler.UnobservedTaskException += (_, e) => WriteCrashLog(e.Exception);
     }
 
     /// <summary>
@@ -104,8 +107,23 @@ public partial class App : Application
         var dictionary = new TermDictionary(TermDictionary.PathFor(workspace.Library.MetaDirectory));
         transcriber.HintProvider = dictionary.WhisperHintText;
 
+        // Haas-ja (experimental, chosen in the settings): speech.cpp as a separate process, found in
+        // models\haas ("--haas-dir <folder>" for tests). Its vocabulary is the same marked terms.
+        string device = FloatingMemo.Services.Acceleration.AccelerationState.Mode == FloatingMemo.Services.Acceleration.AccelerationMode.CpuOnly ? "cpu" : "auto";
+        var haas = GetArgument("--haas-dir") is { } haasDir ? SpeechCppTranscriptionService.FromFolder(haasDir, device) : SpeechCppTranscriptionService.Find(device);
+        if (haas is not null)
+        {
+            haas.KeywordsProvider = dictionary.HaasKeywordsText;
+        }
+
+        // "--speech-recognizer whisper|haas-ja" (tests) overrides the saved choice for this run.
+        if (GetArgument("--speech-recognizer") is { } recognizer)
+        {
+            preferences.SpeechRecognizer = recognizer == "whisper" ? null : recognizer;
+        }
+
         var window = new MainWindow(new MemoServices(workspace, recorder, transcriber, settings, preferences, devices, captureFactory,
-            () => CreateMinutesModel(preferences.MinutesModel), dictionary));
+            () => CreateMinutesModel(preferences.MinutesModel), dictionary) { Haas = haas });
 #if TEST_HOOKS
         // Debug builds only: "--theme light|dark" previews a theme without changing Windows settings.
         if (GetArgument("--theme") is { } theme && Enum.TryParse<ElementTheme>(theme, ignoreCase: true, out var requested)

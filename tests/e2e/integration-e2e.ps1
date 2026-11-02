@@ -14,7 +14,7 @@ function NotePath([string]$title) {
 function ReadNote([string]$title) { $p = NotePath $title; if (Test-Path $p) { [IO.File]::ReadAllText($p, [Text.UTF8Encoding]::new($false)) } else { '' } }
 function WaitIdle($sec = 180) {
   $deadline = (Get-Date).AddSeconds($sec)
-  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null) { return $true }; Start-Sleep -Milliseconds 250 }
+  while ((Get-Date) -lt $deadline) { if ((Find "録音開始" -ByName) -ne $null -and (JobsState) -match '^unfinished=0 ') { return $true }; Start-Sleep -Milliseconds 250 }
   $false
 }
 
@@ -62,7 +62,7 @@ try {
   Start-Sleep -Milliseconds 800
   Invoke-Button $b; Start-Sleep -Milliseconds 500
   $bTyped = ""
-  for ($i = 0; $i -lt 6 -and -not (Find "録音開始" -ByName); $i++) {
+  for ($i = 0; $i -lt 6 -and -not ((JobsState) -match '^unfinished=0 '); $i++) {
     SafeKeys 0x11, 0x23; SafeType "<B$i>"; $bTyped += "<B$i>"; Start-Sleep -Milliseconds 700
   }
   Check "transcription finished" (WaitIdle 240)

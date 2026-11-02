@@ -151,6 +151,34 @@ public sealed class TermDictionary
     }
 
     /// <summary>
+    /// Haas-ja's custom vocabulary from the same terms the user marked as recognition hints (at
+    /// most 30): one "表記=よみ" a line (the reading only when it is kana), else the written form.
+    /// Haas boosts the words while decoding and keeps a change only where a whole word results;
+    /// nothing in the transcript is replaced afterwards. Null when no term is marked.
+    /// </summary>
+    public string? HaasKeywordsText() => HaasKeywords(ActiveEntries.Where(e => e.WhisperHint).Take(30));
+
+    internal static string? HaasKeywords(IEnumerable<TermEntry> entries)
+    {
+        var lines = new List<string>();
+        foreach (var e in entries)
+        {
+            // "=" and line breaks separate the vocabulary's fields: such a term cannot be given.
+            string term = e.Term.Trim();
+            if (term.Length == 0 || term.Contains('=') || term.Contains('\n'))
+            {
+                continue;
+            }
+
+            string? reading = e.Reading?.Trim().Replace(" ", string.Empty).Replace("　", string.Empty);
+            bool kana = reading is { Length: > 0 } && reading.All(c => c is (>= 'ぁ' and <= 'ヿ') or 'ー'); // hiragana and katakana
+            lines.Add(kana && reading != term ? $"{term}={reading}" : term);
+        }
+
+        return lines.Count == 0 ? null : string.Join("\n", lines);
+    }
+
+    /// <summary>
     /// Whisper hint: only terms the user marked for it (at most 30, ~200 characters), or null.
     /// Whisper's prompt is short, and words in it can leak into silent parts, so it stays small.
     /// </summary>
